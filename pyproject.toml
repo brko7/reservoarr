@@ -1,0 +1,44 @@
+[project]
+name = "reservoarr"
+version = "6.1.0"
+description = "Delay-buffer stream profile for Dispatcharr — absorbs IPTV CDN gaps so Plex Live TV stops dying"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+# RUNTIME DEPENDENCIES: NONE. reservoir.py is stdlib-only by design — Dispatcharr's
+# AIO container has no pip available for end-users and the script must run unchanged
+# in that environment. Anything below is dev/test only.
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-xdist>=3",
+    "ruff>=0.6",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = [
+    "e2e: requires ffmpeg; spawns subprocesses; slower (~10-30s each)",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+# Conservative ruleset; the script is intentionally low-abstraction.
+select = ["E", "F", "W", "B", "UP", "SIM"]
+ignore = [
+    "E501",  # line length is handled by formatter / not worth gating
+    "B007",  # unused loop variable — common in TS-packet parsing
+]
+
+[tool.ruff.lint.per-file-ignores]
+# reservoir.py is single-file, audited, every line earned by a real production
+# failure (see CHANGELOG.md). Style-only suggestions don't apply: a Yoda
+# condition or a try/except/pass that was written deliberately stays as-is.
+# We still get correctness coverage via py_compile + the full unit/e2e suite.
+"reservoir.py" = ["E741", "SIM105", "SIM300", "SIM117"]

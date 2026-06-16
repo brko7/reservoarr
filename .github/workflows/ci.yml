@@ -1,0 +1,38 @@
+name: ci
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Install just
+        uses: extractions/setup-just@v3
+
+      - name: Install dev deps
+        run: just venv
+
+      - name: Lint + syntax
+        run: just lint
+
+      - name: Generate synthetic fixture
+        run: just fixture
+
+      - name: Unit tests
+        run: just test
+
+      - name: End-to-end tests
+        run: just e2e
