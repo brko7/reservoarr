@@ -2,6 +2,22 @@
 
 All notable changes to `reservoarr.py`. Each version's invariants are earned by a real production failure — read this before changing the script.
 
+## [6.2.1] — 2026-06-21
+
+Bug fix: TS-packet alignment on writes to ffmpeg's stdin.
+
+- **`align_to_188(tail, chunk)`** module-level helper. The pacing loop now feeds ffmpeg only 188-byte multiples, carrying any unaligned tail across iterations. Previously, the loop wrote each `next_slice()` result `d` to `ff.stdin` directly. Because `r.read()` on the upstream HTTP socket returns arbitrary-length byte runs and the deque accumulates them whole, those writes did not reliably start at 188-byte TS-packet boundaries. ffmpeg's mpegts demuxer assumes they do, so partial-packet writes were detected as `timestamp discontinuity` events and (when the misalignment landed on AAC PES headers) as `channel element X.Y is not allocated` decoder errors that silently discarded audio frames. The viewer experienced the cumulative AAC frame discards as audio drifting out of sync with video over the course of a session.
+
+  **Discovered 2026-06-16 evening** while debugging audio desync on channel 500157163 (kids' viewing). Diagnosis came from comparing live ffmpeg session telemetry to ffmpeg consuming the same captured upstream as a regular file: the offline run, which naturally reads in 188-aligned blocks, produced 0 disc lines / 30s; the live run, paced through the reservoir with arbitrary-length writes, produced 100+ disc lines / 30s on identical bytes. The provider's stream itself was clean.
+
+  **Soak result:** deployed to tigar at 16:30 UTC on 2026-06-16; ran clean across multiple kid viewings (ccerr=0, pcrrej=0, no `would-fire` events, no audio desync) for 5 days before this release. The latent bug was present in every reservoir version since v5; it manifested as user-visible failures only when an unrelated provider-side stream variation (post-2026-06-16 source had AAC PES boundaries that landed on misaligned write boundaries more often) crossed the bug.
+
+- **`tests/unit/test_ts_alignment.py`** — 17 regression tests covering: function existence (a revert that drops `align_to_188` fails loudly), every output is a 188-multiple, byte-perfect reconstruction across arbitrary chunk sequences, pathological one-byte chunks, empty inputs, parametrized realistic and adversarial chunk sizes, and a 2000-iteration randomized property check that the carried tail stays bounded below 188.
+
+  No existing test would have caught this: the e2e suite uses synthetic fixtures whose AAC PES headers don't happen to land on the bug, and ground-truth comparisons key off ccerr/sync counters that are themselves fed misaligned bytes. The new unit tests target the alignment invariant directly.
+
+**Implication for prior incident analysis:** earlier `iptv-incidents.md` entries that attributed AAC `channel element` errors and timestamp-discontinuity floods to provider-side corruption may have been measuring the bug's effects rather than (or as well as) real upstream damage. The 2026-06-16 #5-arming experiment in particular ran on bug-induced ccerr inflation; its "source-wide corruption, reconnect doesn't help" conclusion is therefore not reliable evidence against arming, and the open question remains open. Real provider corruption of course still exists — but it should be re-baselined against post-fix telemetry.
+
 ## [6.2.0] — 2026-06-16
 
 Packaging-only release ahead of the public flip. **No runtime behaviour changes** — `reservoarr.py` is byte-equivalent to v6.1.0 modulo the rename in its docstring and usage string.

@@ -424,6 +424,26 @@ def fetcher():
         cond.notify_all()
 
 
+def align_to_188(tail, chunk):
+    """TS-packet-aligned write helper. r.read() and the deque produce arbitrary-
+    length byte runs, but ffmpeg's mpegts demuxer assumes each write to its stdin
+    starts at a 188-byte packet boundary. Mid-packet writes cause spurious
+    `timestamp discontinuity` detections plus AAC `channel element X.Y is not
+    allocated` errors as half-frames hit the decoder, which present to the viewer
+    as audio/video desync drifting worse over a session.
+
+    Discovered 2026-06-16 evening: a live session produced 100+ disc lines per
+    minute that disappeared when ffmpeg consumed the same captured upstream as a
+    regular file (offline reads naturally land 188-aligned). Fix: only ever pass
+    188-multiples downstream; carry the unaligned tail to the next call.
+
+    Returns (aligned_bytes, new_tail). Both bytes objects, possibly empty.
+    """
+    buf_ = tail + chunk if tail else chunk
+    n = (len(buf_) // 188) * 188
+    return buf_[:n], buf_[n:]
+
+
 def next_slice():
     """Pop up to PACE_SLICE bytes from the reservoir, returning the released-byte
     total snapshotted under the same lock (in_total and buf_bytes both move under
@@ -484,6 +504,7 @@ def main():
     last_pace = time.time()
     prev_ccerr = prev_sync = prev_in_total = 0                        # #5 detector: per-window deltas
     ts_bad_wins = 0
+    unaligned_tail = b""                                              # see align_to_188(): ffmpeg expects 188-aligned writes
     try:
         while not stop.is_set():
             d, released_total = next_slice()
@@ -522,8 +543,10 @@ def main():
                     last_pace = time.time()
                 elif pace_debt < -2.0:
                     pace_debt = 0.0                                   # don't bank idle time
-            ff.stdin.write(d)
-            out_since_stats += len(d)
+            aligned, unaligned_tail = align_to_188(unaligned_tail, d)
+            if aligned:
+                ff.stdin.write(aligned)
+                out_since_stats += len(aligned)
             now = time.time()
             if now - last_stats >= STATS_EVERY_S:
                 orate = out_since_stats / (now - last_stats)
