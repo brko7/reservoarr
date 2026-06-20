@@ -1,6 +1,16 @@
 # CHANGELOG
 
-All notable changes to `reservoir.py`. Each version's invariants are earned by a real production failure — read this before changing the script.
+All notable changes to `reservoarr.py`. Each version's invariants are earned by a real production failure — read this before changing the script.
+
+## [6.2.0] — 2026-06-16
+
+Packaging-only release ahead of the public flip. **No runtime behaviour changes** — `reservoarr.py` is byte-equivalent to v6.1.0 modulo the rename in its docstring and usage string.
+
+- **Rename** `reservoir.py` → `reservoarr.py`. Single name across repo, package, plugin, and brand. v6.1.0 was never tagged or released, so impact is theoretical; anyone vendoring from this repo's `main` before today should update their Stream Profile command path.
+- **Dispatcharr plugin** (`plugin/plugin.py` + `plugin/plugin.json`). Installs `reservoarr.py` under `/data/reservoarr/`, exposes a "Generate Stream Profile" action, and optionally sets it as the instance-wide default Stream Profile. Same shape as the upstream [Dispatchwrapparr](https://github.com/jordandalley/dispatchwrapparr) precedent. `min_dispatcharr_version: v0.25.0`. Intentionally does NOT expose tuning fields — `RESV_*` env vars on the container remain the override mechanism, keeping the plugin minimal and the script's design untouched.
+- **Release workflow** (`.github/workflows/release.yml`). On `v*` tag push, builds `reservoarr-<version>.zip` (plugin bundle with `reservoarr.py` adjacent to `plugin.py`) and attaches both the zip and standalone script to the GitHub Release with SHA256 in the body.
+- **Docs reorg.** README front-loads What/Who/Install; the hard-invariants table, env-var reference, and telemetry schema moved to dedicated files under `docs/`. `CONTRIBUTING.md` and `SECURITY.md` added. `docs/PLUGIN_REGISTRY_SUBMISSION.md` documents the checklist for submitting to the [Dispatcharr/Plugins](https://github.com/Dispatcharr/Plugins) registry (not yet submitted — waits on the public flip + v6.2.0 release).
+- **LICENSE** copyright line clarified (`brko7 (Ivan Brkic)`).
 
 ## [6.1.0] — 2026-06-16
 

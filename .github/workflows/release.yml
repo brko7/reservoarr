@@ -1,0 +1,98 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build (e.g. v6.2.0). Must already exist."
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Resolve version
+        id: ver
+        run: |
+          # Strip leading 'v' from the tag for filename use.
+          REF="${{ github.event.inputs.tag || github.ref_name }}"
+          VERSION="${REF#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$REF" >> "$GITHUB_OUTPUT"
+
+      - name: Assemble plugin payload
+        run: |
+          set -eu
+          STAGE="stage/reservoarr"
+          mkdir -p "$STAGE"
+          # Plugin code + manifest live alongside the runtime script for self-contained install.
+          cp plugin/plugin.py "$STAGE/plugin.py"
+          cp plugin/plugin.json "$STAGE/plugin.json"
+          cp reservoarr.py "$STAGE/reservoarr.py"
+          cp LICENSE "$STAGE/LICENSE"
+          cp README.md "$STAGE/README.md"
+          chmod +x "$STAGE/reservoarr.py"
+
+      - name: Build zip
+        id: zip
+        run: |
+          set -eu
+          VERSION="${{ steps.ver.outputs.version }}"
+          OUT="reservoarr-${VERSION}.zip"
+          (cd stage && zip -r "../$OUT" reservoarr)
+          SHA256=$(sha256sum "$OUT" | awk '{print $1}')
+          echo "out=$OUT" >> "$GITHUB_OUTPUT"
+          echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
+
+      - name: Hash standalone script
+        id: scripthash
+        run: |
+          SHA256=$(sha256sum reservoarr.py | awk '{print $1}')
+          echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
+
+      - name: Generate release notes body
+        id: notes
+        run: |
+          cat > release-body.md <<'EOF'
+          See [CHANGELOG.md](https://github.com/brko7/reservoarr/blob/${{ steps.ver.outputs.tag }}/CHANGELOG.md) for what changed.
+
+          ## Artifacts
+
+          | File | SHA256 |
+          |---|---|
+          | `reservoarr-${{ steps.ver.outputs.version }}.zip` (Dispatcharr plugin bundle) | `${{ steps.zip.outputs.sha256 }}` |
+          | `reservoarr.py` (standalone script) | `${{ steps.scripthash.outputs.sha256 }}` |
+
+          ## Install
+
+          **Dispatcharr plugin (recommended):** Dispatcharr → Plugins → Find Plugins → search "reservoarr" → Install. Once the registry submission is accepted, this URL is the source the registry pulls from.
+
+          **Manual:** download `reservoarr.py`, drop into `/data/scripts/reservoarr.py` inside the Dispatcharr container, `chmod +x`, add a Stream Profile pointing at it. See [README](https://github.com/brko7/reservoarr/blob/${{ steps.ver.outputs.tag }}/README.md#install) for full instructions.
+
+          **Ansible/IaC:**
+
+          ```yaml
+          reservoarr_version: ${{ steps.ver.outputs.version }}
+          reservoarr_sha256: ${{ steps.scripthash.outputs.sha256 }}
+          ```
+          EOF
+
+      - name: Create/update release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: ${{ steps.ver.outputs.tag }}
+          body_path: release-body.md
+          files: |
+            ${{ steps.zip.outputs.out }}
+            reservoarr.py
