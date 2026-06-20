@@ -24,3 +24,6 @@ venv/
 # Logs from local e2e
 tests/e2e/.tmp/
 *.log
+
+# Claude Code session config
+.claude/

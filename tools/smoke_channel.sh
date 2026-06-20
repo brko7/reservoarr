@@ -46,7 +46,7 @@ else:
 " "$CH") ;;
 esac
 
-ACTIVE=$(ssh "$HOST" "docker exec $CONTAINER sh -c 'pgrep -af scripts/reservoir.py | grep -v pgrep | wc -l'" || echo 0)
+ACTIVE=$(ssh "$HOST" "docker exec $CONTAINER sh -c 'pgrep -af scripts/reservoarr.py | grep -v pgrep | wc -l'" || echo 0)
 if [ "$ACTIVE" -gt 0 ]; then
   echo "WARNING: $ACTIVE stream(s) already active — provider connection cap may apply."
   echo "         Ctrl-C within 5s if someone is watching."

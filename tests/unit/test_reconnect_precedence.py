@@ -5,7 +5,7 @@ the fetcher).
 
 Ported from tmp/test_reconnect_precedence.py in superlab — the original ran in
 the dispatcharr container; here it runs against the standalone repo's
-reservoir.py via the conftest fixture."""
+reservoarr.py via the conftest fixture."""
 from __future__ import annotations
 
 

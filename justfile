@@ -30,7 +30,7 @@ venv:
 
 # Sanity-check the script compiles.
 syntax:
-    @{{py}} -m py_compile reservoir.py
+    @{{py}} -m py_compile reservoarr.py
     @{{py}} -m py_compile tools/cdn_sim.py
     @{{py}} -m py_compile tools/parsecheck.py
     @{{py}} -m py_compile tools/make_corrupt_ts.py

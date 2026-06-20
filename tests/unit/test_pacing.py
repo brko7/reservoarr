@@ -11,7 +11,7 @@ from __future__ import annotations
 
 
 def pacing_factor(cushion_s, target_s, in_grace, floor_after_grace=0.97, gain=0.3, ceiling=1.15):
-    """Mirror of reservoir.py main()'s pacing math, kept identical."""
+    """Mirror of reservoarr.py main()'s pacing math, kept identical."""
     level_err = (cushion_s - target_s) / target_s
     floor = 1.0 if in_grace else floor_after_grace
     return min(max(1.0 + gain * level_err, floor), ceiling)

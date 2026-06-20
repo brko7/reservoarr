@@ -1,11 +1,11 @@
-"""End-to-end harness. Spawns cdn_sim + reservoir.py as real subprocesses and
-collects: the output TS (stdout of reservoir.py = ffmpeg's stdout = the pipe
-Dispatcharr would consume), reservoir.py's stderr (lifecycle + ffmpeg warnings),
+"""End-to-end harness. Spawns cdn_sim + reservoarr.py as real subprocesses and
+collects: the output TS (stdout of reservoarr.py = ffmpeg's stdout = the pipe
+Dispatcharr would consume), reservoarr.py's stderr (lifecycle + ffmpeg warnings),
 and delaybuf.log (15s telemetry stats).
 
 This is the same shape as the in-container smoke harness — the only difference
 is that the upstream is a local cdn_sim instead of the real CDN, and ffmpeg
-is the system binary. Everything else (stdlib-only reservoir.py, real ffmpeg
+is the system binary. Everything else (stdlib-only reservoarr.py, real ffmpeg
 subprocess, real urllib HTTP client) is the production code path."""
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-RESERVOIR = REPO_ROOT / "reservoir.py"
+RESERVOIR = REPO_ROOT / "reservoarr.py"
 CDN_SIM = REPO_ROOT / "tools" / "cdn_sim.py"
 
 
@@ -96,7 +96,7 @@ def run_pipeline(
     corrupt_from: float | None = None,
     corrupt_rate: int = 5,
 ) -> Run:
-    """Run cdn_sim + reservoir.py for duration_s seconds; return collected
+    """Run cdn_sim + reservoarr.py for duration_s seconds; return collected
     artifacts. Caller asserts on Run.stats_lines() / Run.log_text() / out_ts."""
     port = _free_port()
     out_ts = tmp_path / "out.ts"

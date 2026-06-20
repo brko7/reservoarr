@@ -1,4 +1,4 @@
-"""Shared fixtures. Imports the production reservoir.py *as a module* via
+"""Shared fixtures. Imports the production reservoarr.py *as a module* via
 importlib so its main() guard keeps it from running; tests then exercise
 TsParser / force_upstream_reconnect / etc. directly on the real code.
 
@@ -16,16 +16,16 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-RESERVOIR_PATH = REPO_ROOT / "reservoir.py"
+RESERVOIR_PATH = REPO_ROOT / "reservoarr.py"
 FIXTURES = REPO_ROOT / "fixtures"
 
 
 def _load_reservoir(tmp_log_dir):
-    """Import reservoir.py with side-effects (sys.argv parsing, LOG_DIR setup)
+    """Import reservoarr.py with side-effects (sys.argv parsing, LOG_DIR setup)
     redirected to a clean test environment. Reloaded fresh per test so module-
     level mutable state (buf, in_total, last_forced_*) doesn't leak across tests."""
     os.environ["RESV_LOG_DIR"] = str(tmp_log_dir)
-    sys.argv = ["reservoir", "http://offline/unit-test"]
+    sys.argv = ["reservoarr", "http://offline/unit-test"]
     spec = importlib.util.spec_from_file_location("resv", str(RESERVOIR_PATH))
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
@@ -34,7 +34,7 @@ def _load_reservoir(tmp_log_dir):
 
 @pytest.fixture
 def resv(tmp_path):
-    """Fresh reservoir module per test."""
+    """Fresh reservoarr module per test."""
     return _load_reservoir(tmp_path)
 
 

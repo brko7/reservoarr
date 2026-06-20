@@ -7,7 +7,7 @@ Useful for:
 - spot-checking that a real CDN capture parses cleanly (ccerr/sync should be 0)
 - confirming the synthetic fixture's PCR matches its muxrate within ~1%
 
-Usage: parsecheck.py <capture.ts> [<path/to/reservoir.py>]
+Usage: parsecheck.py <capture.ts> [<path/to/reservoarr.py>]
 """
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from pathlib import Path
 
 def load_reservoir(path):
     # The script reads sys.argv at import time; give it a safe placeholder.
-    sys.argv = ["reservoir", "http://offline/parser-test"]
+    sys.argv = ["reservoarr", "http://offline/parser-test"]
     # Point its log dir away from /data/scripts/logs so dev machines work.
     os.environ.setdefault("RESV_LOG_DIR", "/tmp/reservoarr-parsecheck")
     spec = importlib.util.spec_from_file_location("resv", path)
@@ -41,7 +41,7 @@ def ffprobe_duration(path):
 
 def main():
     cap = Path(sys.argv[1])
-    script = Path(sys.argv[2]) if len(sys.argv) > 2 else Path(__file__).resolve().parent.parent / "reservoir.py"
+    script = Path(sys.argv[2]) if len(sys.argv) > 2 else Path(__file__).resolve().parent.parent / "reservoarr.py"
 
     mod = load_reservoir(str(script))
     data = cap.read_bytes()

@@ -4,7 +4,7 @@
 # Why synthetic: the production provider (IPTorrents IPTV) is unreliable at
 # prime-time, so CI cannot depend on capturing a live stream. testsrc2 + sine
 # through ffmpeg produces a deterministic 180s H.264+AC3 mpegts with PCR — the
-# same shape reservoir.py parses from the CDN, but reproducible byte-for-byte.
+# same shape reservoarr.py parses from the CDN, but reproducible byte-for-byte.
 #
 # Usage: make_synth_ts.sh <out.ts>
 set -euo pipefail

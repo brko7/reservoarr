@@ -1,7 +1,7 @@
 """#5 ingest-side TS-corruption detector: replay the rule against the real
 2026-06-14 incident signature, plus baselines and clean reconnect/gap seams.
 
-The rule (per reservoir.py main()'s stats loop):
+The rule (per reservoarr.py main()'s stats loop):
   if ingest_adv > 0 and (dccerr >= 3 or dsync >= 2):
       bad_wins += 1
   else:
@@ -18,7 +18,7 @@ from __future__ import annotations
 
 def fires(windows, cc_th=3, sync_th=2, sustain=2):
     """windows: list of (dccerr, dsync, ingest_adv). Returns the indices where
-    the rule trips. Mirrors reservoir.py exactly: reset bad_wins after firing."""
+    the rule trips. Mirrors reservoarr.py exactly: reset bad_wins after firing."""
     bad = 0
     out = []
     for i, (dcc, dsy, adv) in enumerate(windows):

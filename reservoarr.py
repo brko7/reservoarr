@@ -20,7 +20,7 @@ exclusion bias in the rate window). Pacing at the PCR-derived content rate
 banks the front-load surplus by construction - on every connect, including
 the reconnect after a corrupt-loop flush.
 
-Invoked by Dispatcharr as: reservoir.py {streamUrl} {userAgent}
+Invoked by Dispatcharr as: reservoarr.py {streamUrl} {userAgent}
 stdout -> Dispatcharr relay pipe (must carry ONLY the TS stream)
 stderr -> Dispatcharr's transcode logger (INFO only for lines containing
           stream/input/output/video/audio; everything else lands at DEBUG)
@@ -40,7 +40,7 @@ import urllib.request
 from collections import deque
 
 if len(sys.argv) < 2 or not sys.argv[1].strip():
-    sys.stderr.write("[delaybuf] usage: reservoir.py <streamUrl> [userAgent]\n")
+    sys.stderr.write("[delaybuf] usage: reservoarr.py <streamUrl> [userAgent]\n")
     sys.exit(2)
 URL = sys.argv[1]
 UA = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2].strip() else "Mozilla/5.0"
