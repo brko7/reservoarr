@@ -2,6 +2,16 @@
 
 All notable changes to `reservoarr.py`. Each version's invariants are earned by a real production failure — read this before changing the script.
 
+## [6.2.2] — 2026-06-21
+
+Packaging-only release ahead of the Dispatcharr/Plugins registry submission. **No runtime behaviour changes** — `reservoarr.py` is byte-identical to v6.2.1.
+
+- **`plugin/plugin.json` version drift fix.** v6.2.1's release zip shipped `plugin.json` saying `version: 6.2.0` because the version-sync guard (see [PR #1](https://github.com/brko7/reservoarr/pull/1)) was merged *after* the v6.2.1 tag. The plugin's upgrade gate (`packaged > local`) would therefore not fire on a v6.2.0 → v6.2.1 in-place install; users would silently keep running pre-alignment-fix code. Discovered during the registry-submission dry-run.
+- **First release built under the version-sync CI guard.** `pyproject.toml`, `plugin/plugin.json`, and `plugin/plugin.py` are now enforced equal-or-fail by `tools/check_versions.py`, wired into both `just lint` and `release.yml`. The drift that produced the v6.2.1 zip cannot recur silently.
+- **First release built under the deterministic-zip recipe** (`SOURCE_DATE_EPOCH` pinned to the tag commit, `-X`, sorted file list — see [PR #2](https://github.com/brko7/reservoarr/pull/2)). The release `sha256` is now reproducible from the tag.
+
+Repo also flipped public this day. Dispatcharr/Plugins registry submission tracks this release as the canonical published version.
+
 ## [6.2.1] — 2026-06-21
 
 Bug fix: TS-packet alignment on writes to ffmpeg's stdin.
