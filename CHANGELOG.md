@@ -2,6 +2,16 @@
 
 All notable changes to `reservoarr.py`. Each version's invariants are earned by a real production failure — read this before changing the script.
 
+## [6.2.3] — 2026-06-21
+
+User-facing packaging release. **No runtime behaviour changes** — `reservoarr.py` is byte-identical to v6.2.1 and v6.2.2 (sha `4f61fe0e…`).
+
+- **Plugin logo** (`plugin/logo.png` + `plugin/logo.svg`). Damped-wave flow mark: jagged on the left (chaotic upstream input), smooth parallel lines on the right (paced output to the player), with a small amber accent dot at the calm side. Designed via Claude Design as a clean SVG (763 bytes source) and rasterised to 512×512 RGBA PNG for the registry tile. The release zip now carries `logo.png` (see `.github/workflows/release.yml` change in [PR #12](https://github.com/brko7/reservoarr/pull/12)); Dispatcharr's plugin loader auto-picks-up `logo.png` from the plugin directory per the upstream `Plugins.md` spec.
+- **README walkthrough + troubleshooting** ([PR #11](https://github.com/brko7/reservoarr/pull/11)). Install Option 1 is now an explicit 5-step sequence (Install → open settings → optional default toggle → Generate → refresh). A "First channel tune" section shows a real stats line and what every field should look like when healthy. A "Troubleshooting" section covers the six failure modes a new user actually hits (stream still dies on prime-time gaps, cushion never reaches target, ccerr climbing, AV desync, Plex won't tune, telemetry file missing) — each with a diagnostic path, not a fix recipe. README ships inside the plugin zip, so registry users get the same docs as GitHub viewers.
+- **Plugin UI gains a `next_steps` info field** ([PR #11](https://github.com/brko7/reservoarr/pull/11)). Dispatcharr renders plugin info fields above the action buttons; this one walks the user through the post-Generate sequence (where the Stream Profile lands, per-channel vs default, tail the log, what cushion should do in the first ~60s). Previously the in-Dispatcharr text was a single tuning hint.
+
+This is the **first release to ship a logo + walkthrough docs**, and is what the Dispatcharr/Plugins registry will display on its tile from v6.2.3 onward. v6.2.2's tile shows a placeholder; users on auto-update upgrade to v6.2.3 on the registry's next refresh cycle.
+
 ## [6.2.2] — 2026-06-21
 
 Packaging-only release ahead of the Dispatcharr/Plugins registry submission. **No runtime behaviour changes** — `reservoarr.py` is byte-identical to v6.2.1.
