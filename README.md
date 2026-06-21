@@ -65,7 +65,7 @@ The pattern below — `get_url` of a tagged release with a sha256 checksum, Reno
 ```yaml
 # defaults/main.yml
 # renovate: datasource=github-releases depName=brko7/reservoarr
-reservoarr_version: 6.2.1
+reservoarr_version: 6.2.3
 reservoarr_sha256: <fill from release>
 ```
 
@@ -146,7 +146,7 @@ CC (continuity counter) errors flag genuine TS-packet damage. Some sources have 
 
 ### "Audio and video drift out of sync"
 
-The 2026-06-16 alignment bug (latent since v5, fixed in v6.2.1) was the cause of every prior AV-desync report in this codebase. If you're on v6.2.2 or later and still see it:
+The 2026-06-16 alignment bug (latent since v5, fixed in v6.2.1) was the cause of every prior AV-desync report in this codebase. If you're on v6.2.1 or later and still see it:
 
 1. Check the log for `Packet corrupt (stream = N, dts = M)` lines (these are ffmpeg-stderr relayed). A loop of *same* `dts` 3× in 120s triggers the corrupt-loop detector — the script will reconnect and flush.
 2. If it's *different* dts each time, the source is genuinely emitting damaged frames; the `#5` detector (log-only by default) catches this class and would-fire on it. Arm it as above.
