@@ -1,6 +1,9 @@
 # reservoarr
 
-> ℹ️ **Private repo.** Releases (currently `v6.2.1`) exist but their assets require auth to download. The Dispatcharr Plugins-registry submission (Option 1 below) is deferred until the repo flips public — see [docs/PLUGIN_REGISTRY_SUBMISSION.md](docs/PLUGIN_REGISTRY_SUBMISSION.md). Until then, run this via the **Option 2 vendored-copy** path (clone, copy `reservoarr.py` to the container).
+[![ci](https://github.com/brko7/reservoarr/actions/workflows/ci.yml/badge.svg)](https://github.com/brko7/reservoarr/actions/workflows/ci.yml)
+[![release](https://img.shields.io/github/v/release/brko7/reservoarr?display_name=tag&sort=semver)](https://github.com/brko7/reservoarr/releases/latest)
+[![license: MIT](https://img.shields.io/github/license/brko7/reservoarr)](LICENSE)
+[![python: 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 
 A delay-buffer **stream profile for [Dispatcharr](https://github.com/Dispatcharr/Dispatcharr)** that absorbs IPTV CDN gaps so Plex Live TV stops dying.
 
@@ -25,9 +28,11 @@ If your provider streams cleanly and Plex stays happy, you don't need this.
 
 ## Install
 
-### Option 1 — Dispatcharr plugin (recommended, after the registry submission is accepted)
+### Option 1 — Dispatcharr plugin (recommended)
 
-Install via Dispatcharr → Plugins → Find Plugins → search "reservoarr" → Install. Click "Generate Stream Profile" in the plugin settings. Done. **Available once the repo is public and the Dispatcharr/Plugins PR is merged** — see [docs/PLUGIN_REGISTRY_SUBMISSION.md](docs/PLUGIN_REGISTRY_SUBMISSION.md) for status.
+Install via Dispatcharr → Plugins → Find Plugins → search "reservoarr" → Install. Click "Generate Stream Profile" in the plugin settings. Done.
+
+> If "reservoarr" doesn't appear in the registry yet, the submission is still in flight — see [docs/PLUGIN_REGISTRY_SUBMISSION.md](docs/PLUGIN_REGISTRY_SUBMISSION.md). Fall back to Option 2 or 3 below until it lands.
 
 ### Option 2 — Vendored copy + manual Stream Profile
 
@@ -137,9 +142,15 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) before opening a PR.
 | `tools/parsecheck.py` | Feeds a captured TS file through `TsParser` and compares the PCR-derived duration/rate to ffprobe truth. Useful for validating real CDN captures. |
 | `tools/smoke_channel.sh` | Manual ops: tune a Dispatcharr channel end-to-end through the proxy and dump the reservoir telemetry. Parameterized via env (`HOST`, `CONTAINER`, `PROXY_BASE`, `LOG_PATH`) — not CI-runnable. |
 
+## Support & community
+
+- **Bugs / feature requests** → [Issues](https://github.com/brko7/reservoarr/issues) (use the templates — they ask for the telemetry excerpts that make triage fast).
+- **Questions, setup help, tuning** → [Discussions](https://github.com/brko7/reservoarr/discussions).
+- **Security or Code-of-Conduct concerns** → [private advisory flow](https://github.com/brko7/reservoarr/security/advisories/new). See [SECURITY.md](SECURITY.md) and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
+
 ## Security
 
-`reservoarr.py` runs inside the Dispatcharr container with whatever privileges that container has. It fetches the upstream URL Dispatcharr hands it, pipes bytes through ffmpeg, and writes a log file — nothing else. No credentials, no database access, no outbound traffic beyond the configured upstream. See [SECURITY.md](SECURITY.md) for the full threat model and how to report vulnerabilities.
+`reservoarr.py` runs inside the Dispatcharr container with whatever privileges that container has. It fetches the upstream URL Dispatcharr hands it, pipes bytes through ffmpeg, and writes a log file — nothing else. No credentials, no database access, no outbound traffic beyond the configured upstream. See [SECURITY.md](SECURITY.md) for the full threat model.
 
 ## License
 
