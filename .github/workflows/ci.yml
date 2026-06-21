@@ -22,6 +22,13 @@ jobs:
     # completes, with cheap steps (lint + version-check) always running and
     # heavy steps (ffmpeg install + e2e) gated on file paths.
     runs-on: ubuntu-24.04
+    # dorny/paths-filter on pull_request events calls the GitHub listFiles
+    # API; the default GITHUB_TOKEN (workflow permissions set to "read") has
+    # contents:read only, so we explicitly grant the minimum PR-metadata
+    # scope. Everything else stays default-deny.
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
 
