@@ -81,12 +81,6 @@ The script went through five offline prototypes before v5, killed by:
 
 ## Decided NOT to build
 
-Each was considered, evidence-evaluated, and rejected.
-
-| Rejected | Why |
-|---|---|
-| EOF-reconnect overlap-replay dedup | The controller self-drains the 1.15× post-reconnect bloat in ~2 min; the event is rare; a PCR-splice dedup risks dropping live content on a garbage seam. Add a log marker + gather evidence first. |
-| `ffmpeg -readrate` | Timestamp-driven → same garbage-DTS stall as `-re`. |
-| Output null-stuffing | Breaks Emby / Jellyfin per the Dispatcharr v0.26.0 changelog. |
-| asyncio rewrite | No benefit at this bitrate; loses the simple stdlib-thread model. |
-| tmpfs ring buffer | No benefit at this bitrate; complicates deployment. |
+See [docs/INVARIANTS.md](docs/INVARIANTS.md#decisions-deliberately-not-taken)
+for the rejected-decisions table. It's a permanent reference, not a per-release
+list, and lives with the rest of the design-rule reference.

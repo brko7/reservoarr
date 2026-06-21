@@ -19,8 +19,8 @@ reservoarr is a small, audited single-file script with a hard rule that every li
 ```bash
 just venv       # one-time: create .venv with pytest + ruff + pytest-xdist
 just fixture    # generate fixtures/synth.ts (deterministic, ~2s, needs ffmpeg)
-just test       # unit tests (~1s, no ffmpeg)
-just e2e        # synthetic end-to-end (~75s wall-clock, needs ffmpeg)
+just test       # unit tests (52 tests, ~1s, no ffmpeg)
+just e2e        # synthetic end-to-end (7 tests, ~90s wall-clock with xdist -n auto, needs ffmpeg)
 just all        # lint + unit + e2e
 ```
 

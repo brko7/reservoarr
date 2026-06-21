@@ -22,7 +22,7 @@ from core.models import StreamProfile
 
 class Plugin:
     name = "reservoarr"
-    version = "6.2.0"
+    version = "6.2.1"
     description = "Delay-buffer stream profile that absorbs IPTV CDN gaps so Plex Live TV stops dying"
     author = "brko7"
     help_url = "https://github.com/brko7/reservoarr"
@@ -112,10 +112,10 @@ class Plugin:
         ]
 
     def _read_installed_version(self):
-        """Best-effort: pull the version string from the installed script's pyproject
-        sibling, OR from a `__version__` line, OR fall back to None. We don't ship
-        --version flag on reservoarr.py because the runtime path is performance-sensitive
-        and adds argparse weight; instead we cache the packaged version in a sentinel."""
+        """Read the version stamped by the most recent _install() into
+        <dst_dir>/.installed_version. None if missing or unparseable —
+        the upgrade gate in __init__ treats either as "no upgrade", which is
+        safe because a missing dst_script is handled separately."""
         sentinel = Path(self.dst_dir) / ".installed_version"
         try:
             return self._parse_version(sentinel.read_text().strip())

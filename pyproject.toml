@@ -36,7 +36,7 @@ exclude = ["*"]
 testpaths = ["tests"]
 addopts = "-ra --strict-markers"
 markers = [
-    "e2e: requires ffmpeg; spawns subprocesses; slower (~10-30s each)",
+    "e2e: requires ffmpeg; spawns subprocesses; slower (~45-85s each, run in parallel via xdist)",
 ]
 
 [tool.ruff]
