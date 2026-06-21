@@ -1,0 +1,26 @@
+version: 2
+updates:
+  # Dev dependencies — pinned in pyproject.toml [project.optional-dependencies].
+  # Runtime is stdlib-only by design (see CONTRIBUTING.md), so the only thing
+  # to keep current is pytest / ruff for the dev pipeline.
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+
+  # GitHub Actions — workflows pin to commit SHAs (defense against tag-move
+  # supply-chain attacks). Dependabot rewrites the SHA + the trailing comment
+  # in lockstep, so the human-readable version stays accurate.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - ci

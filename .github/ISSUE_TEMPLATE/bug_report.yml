@@ -1,0 +1,62 @@
+name: Bug report
+description: Something broke in production — streams dying, audio desync, false-positive detector firings.
+title: "[bug] "
+labels:
+  - bug
+  - needs-triage
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing: skim `docs/INVARIANTS.md` and the recent entries in `CHANGELOG.md` —
+        many failure modes have a documented incident behind them and a recommended diagnostic path.
+
+        For false-fires of detector #5 in log-only mode ("would-fire didn't / shouldn't fire"),
+        see the "Reporting a 'would-fire didn't fire'" section in `CONTRIBUTING.md`.
+  - type: input
+    id: version
+    attributes:
+      label: reservoarr version
+      description: What does `sha256sum reservoarr.py` say? Match it against a release in `CHANGELOG.md`.
+      placeholder: "v6.2.1 (sha 4f61fe0e…)"
+    validations:
+      required: true
+  - type: input
+    id: dispatcharr
+    attributes:
+      label: Dispatcharr version
+      placeholder: "v0.26.0"
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: Symptoms as the viewer experienced them, plus your initial diagnosis if any.
+    validations:
+      required: true
+  - type: textarea
+    id: telemetry
+    attributes:
+      label: delaybuf.log excerpt
+      description: 15 minutes before and after the event. Strip `ffmpeg:` lines if you can; keep `cushion=` / lifecycle / `would-fire` lines.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: env
+    attributes:
+      label: RESV_* env settings
+      description: Any overrides? Defaults match v6.1 production behaviour.
+      render: bash
+      placeholder: "RESV_TARGET_S=30  RESV_TS_RECONNECT=0  (defaults)"
+  - type: dropdown
+    id: resolved-by-restart
+    attributes:
+      label: Did restarting the channel resolve it?
+      options:
+        - "Yes — fresh tune was clean"
+        - "No — persisted across restarts"
+        - "Didn't try"
+    validations:
+      required: true

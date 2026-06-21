@@ -1,0 +1,4 @@
+# Default reviewer for every PR. brko7 is the sole maintainer; see
+# CONTRIBUTING.md for the contribution model (every change must respect
+# docs/INVARIANTS.md and ship test coverage for the affected path).
+*       @brko7
