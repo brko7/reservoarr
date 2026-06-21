@@ -1,6 +1,6 @@
 [project]
 name = "reservoarr"
-version = "6.2.1"
+version = "6.2.2"
 description = "Delay-buffer stream profile for Dispatcharr — absorbs IPTV CDN gaps so Plex Live TV stops dying"
 readme = "README.md"
 license = { text = "MIT" }
