@@ -1,5 +1,11 @@
 blank_issues_enabled: false
 contact_links:
+  - name: Questions & support
+    url: https://github.com/brko7/reservoarr/discussions
+    about: For setup help, "is this a bug or PEBKAC", tuning questions, and Dispatcharr integration troubleshooting. Issues are for confirmed bugs and feature requests only.
   - name: Security vulnerability
     url: https://github.com/brko7/reservoarr/security/advisories/new
     about: Use the private advisory flow — do not file public issues for security reports. See SECURITY.md.
+  - name: Code of Conduct violation
+    url: https://github.com/brko7/reservoarr/security/advisories/new
+    about: Report conduct concerns privately via the same advisory channel. See CODE_OF_CONDUCT.md.

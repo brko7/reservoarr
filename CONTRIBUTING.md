@@ -2,6 +2,14 @@
 
 reservoarr is a small, audited single-file script with a hard rule that every line is earned by a real production failure. That's not a tone — it's the actual contribution model. Read this first.
 
+By participating, you agree to follow this project's [Code of Conduct](CODE_OF_CONDUCT.md).
+
+## Where things go
+
+- **Bugs and feature requests** → [Issues](https://github.com/brko7/reservoarr/issues) (use the templates).
+- **Questions, setup help, "is this a bug?", tuning** → [Discussions](https://github.com/brko7/reservoarr/discussions).
+- **Security or conduct concerns** → [private security advisory](https://github.com/brko7/reservoarr/security/advisories/new) (do not file publicly).
+
 ## Rules
 
 1. **stdlib-only at runtime.** `reservoarr.py` imports only from the Python ≥3.11 standard library. Dispatcharr's container has no pip available to end-users; a runtime `import requests` will break installs. Dev/test deps (pytest, ruff) live in `pyproject.toml`'s `[dev]` extra.
