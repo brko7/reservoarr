@@ -27,3 +27,6 @@ tests/e2e/.tmp/
 
 # Claude Code session config
 .claude/
+
+# Local drafts (Reddit posts, announcement copy, etc.) — not part of the project
+drafts/

@@ -30,9 +30,17 @@ If your provider streams cleanly and Plex stays happy, you don't need this.
 
 ### Option 1 — Dispatcharr plugin (recommended)
 
-Install via Dispatcharr → Plugins → Find Plugins → search "reservoarr" → Install. Click "Generate Stream Profile" in the plugin settings. Done.
+1. **Install** the plugin: Dispatcharr → Plugins → **Find Plugins** → search `reservoarr` → Install.
+2. **Open** the plugin settings (Plugins → reservoarr).
+3. **(Optional)** tick **"Set as default Stream Profile"** if you want every channel to use it without per-channel assignment. Leave off if you only want it on a subset of channels.
+4. Click **Generate Stream Profile**. A profile named `reservoarr` appears in Settings → Stream Settings → Profiles.
+5. **Refresh** the Dispatcharr browser tab (the profile picker is cached client-side).
 
-> If "reservoarr" doesn't appear in the registry yet, the submission is still in flight — see [docs/PLUGIN_REGISTRY_SUBMISSION.md](docs/PLUGIN_REGISTRY_SUBMISSION.md). Fall back to Option 2 or 3 below until it lands.
+If you didn't set it as default in step 3, assign it per-channel: Channels → Edit → **Stream Profile** → `reservoarr`.
+
+That's it. Now [tune a channel](#first-channel-tune) to confirm it's working.
+
+> Tuning (cushion size, watchdog thresholds, log directory, etc.) is via `RESV_*` environment variables on the Dispatcharr container — not plugin UI fields. Defaults match production-validated behaviour and fit most providers. See [docs/TUNABLES.md](docs/TUNABLES.md) before overriding.
 
 ### Option 2 — Vendored copy + manual Stream Profile
 
@@ -85,17 +93,83 @@ CoreSettings._update_group("stream_settings", "Stream Settings",
                           {"default_stream_profile": p.id})
 ```
 
-## Verifying it works
+## First channel tune
 
-After installing, tune a channel through Plex and watch the telemetry:
+After installing, **start a channel in Plex Live TV** (or your client of choice) and tail the telemetry log:
 
 ```bash
+# Inside the Dispatcharr container (or on the host, against the bind-mount path):
 tail -F /data/scripts/logs/delaybuf.log | grep "cushion="
 ```
 
-Healthy after ~60s: `cushion=` reaches `~25–30s(pcr)` and holds; `ccerr/pcrrej/sync` flat at zero. Full schema in [docs/TELEMETRY.md](docs/TELEMETRY.md).
+You should see one stats line per active stream every 15 seconds. The shape is:
 
-For end-to-end smoke testing against a running Dispatcharr, see `tools/smoke_channel.sh`.
+```
+2026-06-21T10:03:33+0000 [500004175] cushion=27s(pcr) buf=15.5MB out=4.66Mbps in=4.96Mbps crate=4.80Mbps in_total=1843MB reconnects=0 ccerr=0 pcrrej=0 disc=0 sync=0
+```
+
+**Healthy after ~60s:**
+- `cushion=` reaches `~25–30s(pcr)` and oscillates within ±6s of that. The `(pcr)` suffix means the cushion is measured off the PCR clock (good); `(byte)` is a degraded fallback.
+- `ccerr`, `pcrrej`, `disc`, `sync` flat at zero.
+- `reconnects=0` unless your provider is one of the unreliable ones.
+- `out=` ≈ `crate=` ± a few percent.
+
+If something looks off, see [Troubleshooting](#troubleshooting) below. Full telemetry schema in [docs/TELEMETRY.md](docs/TELEMETRY.md).
+
+For end-to-end smoke testing of a specific channel from the command line, see `tools/smoke_channel.sh`.
+
+## Troubleshooting
+
+These are the failure modes real users have hit. Each lists what to check first.
+
+### "Stream still dies on prime-time gaps"
+
+The cushion is your only protection against starvation gaps. If it's too small for your CDN's worst gaps, the stream still dies — `reservoarr` only buys time, not infinity.
+
+1. Tail the log while the failure happens. Note what `cushion=` was reading just before the death.
+2. If cushion was already low (<10s) when the gap hit: **raise `RESV_TARGET_S`** above your observed worst gap. Each +10s of target ≈ +6–8 MB RAM at typical HD bitrates. Bump `RESV_MAX_BYTES` proportionally.
+3. If cushion was healthy (~30s) and you saw a single very long gap (>30s): the CDN is broken or rate-limited. Increase target *and* check provider status — no buffer can hide a sustained content stoppage.
+
+### "Cushion never reaches the target"
+
+`cushion=` plateaus at 5–15s and won't climb. Two common causes:
+
+1. **Source is bitrate-degraded.** Compare `crate=` (PCR content rate) to your channel's nominal rate. If `crate` is well under (e.g. a "5 Mbps" HD channel showing `crate=2 Mbps`), the CDN is throttling and the front-load burst doesn't contain 30s of content. **Nothing to fix in reservoarr; talk to your provider.**
+2. **Cushion is stuck on `(byte)` source.** The PCR clock never locked. Check `pcrrej=`; if it's climbing every window, the stream's PCR samples are unparseable. Try `tools/parsecheck.py` on a captured upstream to confirm.
+
+### "ccerr or sync errors keep climbing"
+
+CC (continuity counter) errors flag genuine TS-packet damage. Some sources have a low baseline (1–2 per stats window); a sustained burst (≥3/window for multiple consecutive windows) is real corruption.
+
+1. If `ccerr` ramps up *with* audio/video desync: corruption is hitting decoded content. Watch for `would-fire: TS corruption detected` lines — that's the ingest-side detector picking it up.
+2. **The `#5` detector ships in log-only mode by default** (`RESV_TS_RECONNECT=0`). To arm it: set `RESV_TS_RECONNECT=1` on the container. The script will then force a reconnect + buffer flush when corruption sustains; see CHANGELOG v6.1.0 for the arming-test recipe and the open question about source-wide vs. edge-specific corruption.
+
+### "Audio and video drift out of sync"
+
+The 2026-06-16 alignment bug (latent since v5, fixed in v6.2.1) was the cause of every prior AV-desync report in this codebase. If you're on v6.2.2 or later and still see it:
+
+1. Check the log for `Packet corrupt (stream = N, dts = M)` lines (these are ffmpeg-stderr relayed). A loop of *same* `dts` 3× in 120s triggers the corrupt-loop detector — the script will reconnect and flush.
+2. If it's *different* dts each time, the source is genuinely emitting damaged frames; the `#5` detector (log-only by default) catches this class and would-fire on it. Arm it as above.
+3. If you see neither: please [open an issue](https://github.com/brko7/reservoarr/issues) with the relevant `delaybuf.log` excerpt — pre-v6.2.1 contamination is now ruled out and a new AV-desync class would be worth investigating.
+
+### "Plex says 'no signal' / channel won't tune on first try"
+
+Plex's tuner times out after ~15s of input starvation. The prefill phase exists to push the first bytes within that window.
+
+1. Check the log for `prefill done: NMB in Ns` after a channel start. The `Ns` is wall-clock time to first frame. If it's >5s, your provider is slow to send the first bytes.
+2. **Do not** raise `RESV_PREFILL_MAX_S` past 5s — Plex's hard ceiling is ~15s and Dispatcharr's connection timeout sits around 10s.
+3. If your provider's first-bytes latency is consistently bad, this is a provider-side problem; no wrapper buffer can fix it.
+
+### Telemetry file isn't appearing
+
+Check `RESV_LOG_DIR` on the container (defaults to `/data/scripts/logs/`). The script `os.makedirs`'s it at startup; if it can't (permission denied, read-only mount), the run continues but logs only to stderr (which Dispatcharr's transcode logger captures separately). Confirm the directory exists and is writable by the container's PUID.
+
+### Still stuck?
+
+Open a [Discussion](https://github.com/brko7/reservoarr/discussions) with:
+- `delaybuf.log` excerpt around the event (15 min before/after)
+- Your `RESV_*` env settings (or "defaults" if none)
+- Whether restarting the channel resolved it
 
 ## How it works
 

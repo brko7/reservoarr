@@ -77,13 +77,25 @@ class Plugin:
                                "Leave off to set it manually per-channel.",
             },
             {
+                "id": "next_steps",
+                "label": "After you click Generate",
+                "type": "info",
+                "description": "1) A Stream Profile named 'reservoarr' appears in Settings → "
+                               "Stream Settings → Profiles. 2) If you ticked 'Set as default' "
+                               "above, every channel uses it automatically; otherwise assign "
+                               "it per-channel under Channels → Edit. 3) Tune a channel in "
+                               "your client and tail /data/scripts/logs/delaybuf.log — you "
+                               "should see 'cushion=NNs(pcr)' climb to ~30s within ~60s. "
+                               "Full walkthrough + troubleshooting at the GitHub link below.",
+            },
+            {
                 "id": "tuning_note",
                 "label": "Tuning",
                 "type": "info",
-                "description": "Defaults match the v6.1 production-validated behaviour and "
-                               "fit most providers. To override (cushion target, watchdog "
-                               "thresholds, log dir, etc.), set RESV_* env vars on the "
-                               "Dispatcharr container — see the Docs link.",
+                "description": "Defaults are production-validated and fit most providers. "
+                               "To override (cushion target, watchdog thresholds, log dir, "
+                               "TS-corruption detector arming, etc.), set RESV_* env vars on "
+                               "the Dispatcharr container — full reference at the GitHub link.",
             },
         ]
 
