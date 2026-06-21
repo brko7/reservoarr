@@ -1,0 +1,42 @@
+name: Feature request
+description: New tunable, new detector, new behaviour — needs evidence and a design discussion before code.
+title: "[feature] "
+labels:
+  - feature
+  - needs-discussion
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing: see `CONTRIBUTING.md` — "PRs that need an issue first" lists what kinds of
+        changes need pre-discussion. Touching pacing math, the controller floor/ceiling, hard
+        invariants, or adding a runtime dependency all start here.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What goes wrong in your environment that the script doesn't currently cover?
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: |
+        For detection rules / threshold changes: `delaybuf.log` excerpts showing
+        what fires/misses, real timestamps, what the CDN was doing.
+      render: text
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: Sketch a solution. Env var? New watchdog? Existing one re-armed?
+  - type: checkboxes
+    id: invariants
+    attributes:
+      label: Invariants impact
+      description: Does this touch any rule in `docs/INVARIANTS.md`?
+      options:
+        - label: This change touches a hard invariant (open this issue first; PR comes later)
+        - label: This change keeps stdlib-only at runtime
+        - label: This change keeps reservoarr.py a single deployable file

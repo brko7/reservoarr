@@ -1,6 +1,6 @@
 # reservoarr
 
-> ⚠️ **Pre-release / not yet published.** This repo is private and the install instructions below reference a `v6.2.0` GitHub Release that does not exist yet. The Dispatcharr Plugins-registry submission is gated on the public flip. Until then, the only way to run this is to clone the repo and follow the Option 2 vendored-copy path manually.
+> ℹ️ **Private repo.** Releases (currently `v6.2.1`) exist but their assets require auth to download. The Dispatcharr Plugins-registry submission (Option 1 below) is deferred until the repo flips public — see [docs/PLUGIN_REGISTRY_SUBMISSION.md](docs/PLUGIN_REGISTRY_SUBMISSION.md). Until then, run this via the **Option 2 vendored-copy** path (clone, copy `reservoarr.py` to the container).
 
 A delay-buffer **stream profile for [Dispatcharr](https://github.com/Dispatcharr/Dispatcharr)** that absorbs IPTV CDN gaps so Plex Live TV stops dying.
 
@@ -25,9 +25,9 @@ If your provider streams cleanly and Plex stays happy, you don't need this.
 
 ## Install
 
-### Option 1 — Dispatcharr plugin (recommended, coming with v6.2.0)
+### Option 1 — Dispatcharr plugin (recommended, after the registry submission is accepted)
 
-Install via Dispatcharr → Plugins → Find Plugins → search "reservoarr" → Install. Click "Generate Stream Profile" in the plugin settings. Done. See [docs/PLUGIN_REGISTRY_SUBMISSION.md](docs/PLUGIN_REGISTRY_SUBMISSION.md) for the registry submission status.
+Install via Dispatcharr → Plugins → Find Plugins → search "reservoarr" → Install. Click "Generate Stream Profile" in the plugin settings. Done. **Available once the repo is public and the Dispatcharr/Plugins PR is merged** — see [docs/PLUGIN_REGISTRY_SUBMISSION.md](docs/PLUGIN_REGISTRY_SUBMISSION.md) for status.
 
 ### Option 2 — Vendored copy + manual Stream Profile
 
@@ -52,7 +52,7 @@ The pattern below — `get_url` of a tagged release with a sha256 checksum, Reno
 ```yaml
 # defaults/main.yml
 # renovate: datasource=github-releases depName=brko7/reservoarr
-reservoarr_version: 6.2.0
+reservoarr_version: 6.2.1
 reservoarr_sha256: <fill from release>
 ```
 

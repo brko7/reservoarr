@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/brko7/reservoarr/security/advisories/new
+    about: Use the private advisory flow — do not file public issues for security reports. See SECURITY.md.
