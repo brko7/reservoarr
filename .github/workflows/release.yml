@@ -30,6 +30,20 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=$REF" >> "$GITHUB_OUTPUT"
 
+      - name: Verify version sync + tag match
+        # The plugin's upgrade gate compares plugin.py's `version` against the
+        # .installed_version sentinel; drift between pyproject.toml,
+        # plugin/plugin.json, plugin/plugin.py, and the git tag silently breaks
+        # the upgrade path for users installing the zip.
+        run: |
+          set -eu
+          python3 tools/check_versions.py
+          PP_VERSION=$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          if [ "$PP_VERSION" != "${{ steps.ver.outputs.version }}" ]; then
+            echo "TAG MISMATCH: tag=${{ steps.ver.outputs.version }} pyproject=$PP_VERSION" >&2
+            exit 1
+          fi
+
       - name: Assemble plugin payload
         run: |
           set -eu

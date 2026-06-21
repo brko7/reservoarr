@@ -36,7 +36,14 @@ syntax:
     @{{py}} -m py_compile tools/make_corrupt_ts.py
     @echo "syntax OK"
 
-lint: venv syntax
+# Assert pyproject.toml, plugin/plugin.json, plugin/plugin.py all carry the
+# same version string. The plugin's upgrade gate (plugin.py: packaged > local)
+# only fires if plugin.py's `version` was bumped — drift breaks the install
+# path for users upgrading the zip. Earned by the 6.2.0/6.2.1 drift.
+version-check:
+    @{{py}} tools/check_versions.py
+
+lint: venv syntax version-check
     @{{ruff}} check .
 
 # Generate the deterministic synthetic TS fixture (180s, ~54MB, H.264 + AC3, with PCR).

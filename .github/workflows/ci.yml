@@ -25,6 +25,9 @@ jobs:
       - name: Install dev deps
         run: just venv
 
+      - name: Version sync (pyproject ↔ plugin.json ↔ plugin.py)
+        run: just version-check
+
       - name: Lint + syntax
         run: just lint
 

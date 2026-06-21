@@ -116,13 +116,13 @@ Deeper reading:
 ```bash
 just venv       # one-time: create .venv with pytest + ruff + pytest-xdist
 just fixture    # generate fixtures/synth.ts (deterministic, ~2s)
-just test       # unit tests (35 tests, ~1s)
-just e2e        # synthetic end-to-end (5 tests, ~75s wall-clock with xdist -n auto)
+just test       # unit tests (52 tests, ~1s)
+just e2e        # synthetic end-to-end (7 tests, ~90s wall-clock with xdist -n auto)
 just all        # lint + unit + e2e
 ```
 
-- **Unit tests**: `TsParser` (PCR extraction, wrap-aware delta, CC continuity, sync recovery, content rate vs ffprobe truth on the fixture), pacing controller math, reconnect-precedence state machine, #5 detector rule replay against the real 2026-06-14 incident signature.
-- **End-to-end tests**: spawn `tools/cdn_sim.py` as a real HTTP server and `reservoarr.py` as a real subprocess, with the system ffmpeg. Asserts cushion build, 12s stall absorbed, >25s stall trips the watchdog without flushing, forced EOF reconnects cleanly, CC corruption logs `would-fire:` with zero false positives.
+- **Unit tests** (52): `TsParser` (PCR extraction, wrap-aware delta, CC continuity, sync recovery, content rate vs ffprobe truth on the fixture), pacing controller math, reconnect-precedence state machine, #5 detector rule replay against the real 2026-06-14 incident signature, and TS-packet alignment regression coverage (v6.2.1 fix).
+- **End-to-end tests** (7): spawn `tools/cdn_sim.py` as a real HTTP server and `reservoarr.py` as a real subprocess, with the system ffmpeg. Asserts cushion build, PCR clock lock, 12s stall absorbed, >25s stall trips the watchdog without flushing, forced EOF reconnects cleanly, CC corruption logs `would-fire:` with zero false positives.
 - **CI**: GitHub Actions runs lint + unit + e2e on every push/PR — provider-independent (synthetic fixture only).
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) before opening a PR.

@@ -3,18 +3,22 @@
 This is a checklist for opening the PR that adds `reservoarr` to the official
 [Dispatcharr/Plugins](https://github.com/Dispatcharr/Plugins) registry.
 
-**Status:** not submitted. Submit after the repo is public and a `v6.2.0` release
-exists with attached `reservoarr-6.2.0.zip`.
+**Status:** not submitted. Submit after the repo is public, using whatever the
+latest release tag is at that point (currently `v6.2.1`; substitute the live
+tag in every step below).
 
 ## Prerequisites
 
 - [ ] `brko7/reservoarr` is **public** on GitHub.
-- [ ] Tag `v6.2.0` exists and the release workflow has produced:
-  - `reservoarr-6.2.0.zip` (the plugin bundle)
+- [ ] Latest release tag exists and the release workflow has produced:
+  - `reservoarr-<version>.zip` (the plugin bundle)
   - SHA256 visible in the release body
 - [ ] The zip's top-level folder is `reservoarr/` (set by `.github/workflows/release.yml`).
 - [ ] The zip contains: `plugin.py`, `plugin.json`, `reservoarr.py`, `LICENSE`, `README.md`.
 - [ ] `plugin.json`'s `version` matches the release tag (without leading `v`).
+      The CI version-sync check enforces this against `pyproject.toml` and
+      `plugin/plugin.py` — if those three drift, the release is broken and
+      installing the zip won't upgrade `reservoarr.py` for existing users.
 - [ ] Smoke-tested on a real Dispatcharr instance: install via Plugins UI →
       "Generate Stream Profile" → tune a channel → telemetry healthy.
 
@@ -40,7 +44,7 @@ Fork [Dispatcharr/Plugins](https://github.com/Dispatcharr/Plugins). Add this fil
 ```json
 {
   "name": "reservoarr",
-  "version": "6.2.0",
+  "version": "<release version, e.g. 6.2.1>",
   "description": "Delay-buffer stream profile that absorbs IPTV CDN gaps so Plex Live TV stops dying",
   "author": "brko7",
   "maintainers": ["brko7"],
@@ -57,7 +61,7 @@ The `{version}` placeholder is substituted by the registry at fetch time — our
 release workflow's filename convention (`reservoarr-<version>.zip`) is what makes
 this work. Don't hardcode the URL.
 
-PR title suggestion: `Add reservoarr plugin v6.2.0`.
+PR title suggestion: `Add reservoarr plugin v<version>`.
 
 PR body: link to this repo, a one-line description, and a screenshot of the
 plugin running in Dispatcharr (the registry maintainers ask for one).
