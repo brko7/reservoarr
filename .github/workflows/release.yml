@@ -53,6 +53,7 @@ jobs:
           # Plugin code + manifest live alongside the runtime script for self-contained install.
           cp plugin/plugin.py "$STAGE/plugin.py"
           cp plugin/plugin.json "$STAGE/plugin.json"
+          cp plugin/logo.png "$STAGE/logo.png"
           cp reservoarr.py "$STAGE/reservoarr.py"
           cp LICENSE "$STAGE/LICENSE"
           cp README.md "$STAGE/README.md"
