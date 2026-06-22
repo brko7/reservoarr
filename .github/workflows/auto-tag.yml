@@ -17,6 +17,15 @@ name: auto-tag
 on:
   push:
     branches: [main]
+    # A release requires bumping pyproject.toml (the version-sync gate
+    # forces plugin.json + plugin.py to follow). No pyproject change ⇒
+    # no version bump possible ⇒ no tag. Skipping the workflow entirely
+    # for docs/refactor/test merges keeps the Actions tab clean.
+    # The workflow's own path is included so edits to it get exercised
+    # immediately, not on the next pyproject bump.
+    paths:
+      - 'pyproject.toml'
+      - '.github/workflows/auto-tag.yml'
 
 permissions:
   contents: write   # push the tag
