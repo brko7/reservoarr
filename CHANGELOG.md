@@ -2,6 +2,22 @@
 
 All notable changes to `reservoarr.py`. Each version's invariants are earned by a real production failure — read this before changing the script.
 
+## [6.3.0] — 2026-06-22
+
+Observability: CDN overlap-replay detector (log-only).
+
+- **`pcr_back=N` telemetry counter + per-event log marker.** A new ingest-side observation: when the upstream PCR jumps backward by more than 0.5s, increment the counter and emit a `pcr backward jump: -X.Xs (last=A.A cur=B.B)` line. The sample is still rejected by the existing `0 < delta < 10s` validity gate, so pacing behaviour is **unchanged** — this release adds zero new actions, only visibility.
+
+  **Discovered 2026-06-22 morning** on channel `500054979` (Nick Jr, kids' viewing): edge `5.253.85.204` served the same 13–27 seconds of content twice, with corrupted TS packets at the seam. ffmpeg saw the duplicate content as `Packet corrupt` followed by `timestamp discontinuity (stream id=256): -20000000`, rewrote outgoing DTS to stay monotonic, and the smart TV played the duplicated bytes — the viewer perceives this as a ~20s "rewind" mid-cartoon. Three rewinds in 8 minutes on a single tune; the same edge had produced the same shape on 2026-06-17. None of the existing counters (`ccerr`, `pcrrej`, `disc`, `sync`) name the failure mode directly: a backward PCR sample lands in `pcrrej` alongside benign garbage timestamps, so the signal was buried.
+
+  The 0.5s threshold filters sub-frame PCR jitter from real overlap-replays. The detector distinguishes a true rewind (signed raw delta in `(-TS_WRAP_S/2, -0.5s)`) from a PCR wrap (raw delta near `-TS_WRAP_S`, which is a benign 26.5-hour rollover, not a content jump). Wrap aliasing is exercised in `test_pcr_wrap_not_counted_as_backward`.
+
+- **3 new tests in `tests/unit/test_ts_parser.py`**: a 21-second rewind (matching the 07:14:01 incident) counts and is logged; sub-0.5s jitter is not counted; a 26.5h wrap is not counted as a rewind. All 55 unit + 7 e2e tests pass.
+
+- **`docs/TELEMETRY.md`** documents the new field and event marker. **`docs/INVARIANTS.md` deliberately unchanged**: the "rejected" table's `EOF-reconnect overlap-replay dedup` row explicitly asked for *"a log marker + gather evidence first"* before any dedup work. This release is exactly that log marker. Whether to act on the evidence (input-side byte-drop, edge blocklist, or arming `RESV_TS_RECONNECT=1`) is a future decision, gated on telemetry from this release.
+
+  **Deliberately NOT done**: input-side byte deduplication, edge-IP blocklist, ffmpeg flag changes. Each was considered. The dedup remains rejected per `INVARIANTS.md` ("a PCR-splice dedup risks dropping live content on a garbage seam"). Edge blocklisting via 302 inspection is viable but premature without telemetry to characterise edge-failure distributions. ffmpeg flags (`+discardcorrupt`, `-avoid_negative_ts`) act on frame-level corruption, not backward-DTS — documented dead-ends.
+
 ## [6.2.3] — 2026-06-21
 
 User-facing packaging release. **No runtime behaviour changes** — `reservoarr.py` is byte-identical to v6.2.1 and v6.2.2 (sha `4f61fe0e…`).
