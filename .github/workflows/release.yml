@@ -45,39 +45,20 @@ jobs:
             exit 1
           fi
 
-      - name: Assemble plugin payload
-        run: |
-          set -eu
-          STAGE="stage/reservoarr"
-          mkdir -p "$STAGE"
-          # Plugin code + manifest live alongside the runtime script for self-contained install.
-          cp plugin/plugin.py "$STAGE/plugin.py"
-          cp plugin/plugin.json "$STAGE/plugin.json"
-          cp plugin/logo.png "$STAGE/logo.png"
-          cp reservoarr.py "$STAGE/reservoarr.py"
-          cp LICENSE "$STAGE/LICENSE"
-          cp README.md "$STAGE/README.md"
-          chmod +x "$STAGE/reservoarr.py"
-
       - name: Build zip (reproducible)
         id: zip
-        # Reproducibility: identical inputs MUST produce a byte-identical zip,
-        # because Ansible deployments pin to the release body's sha256 and a
-        # re-build with the same tag would otherwise invalidate the pin.
-        # - SOURCE_DATE_EPOCH pins all member mtimes (zip honours this since 3.0).
-        # - `-X` strips extra file attributes (ACLs, xattrs) that vary by runner.
-        # - Sorted file list pins member ordering.
-        # - touch each staged file to SOURCE_DATE_EPOCH so the in-zip mtime matches.
+        # tools/build_zip.sh is the single source of truth for the
+        # release-zip recipe; ci.yml's reproducibility check calls it
+        # twice on identical inputs to verify byte-identity holds.
+        # SOURCE_DATE_EPOCH is pinned to the tag commit's timestamp here
+        # so rebuilding the same tag always produces the same zip.
         run: |
           set -eu
           VERSION="${{ steps.ver.outputs.version }}"
-          OUT="reservoarr-${VERSION}.zip"
+          export VERSION
           export SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct "${{ steps.ver.outputs.tag }}")
-          export TZ=UTC
-          find stage/reservoarr -exec touch -d "@$SOURCE_DATE_EPOCH" {} +
-          (cd stage && find reservoarr -type f | LC_ALL=C sort | zip -X -@ "../$OUT")
-          SHA256=$(sha256sum "$OUT" | awk '{print $1}')
-          echo "out=$OUT" >> "$GITHUB_OUTPUT"
+          SHA256=$(./tools/build_zip.sh)
+          echo "out=reservoarr-${VERSION}.zip" >> "$GITHUB_OUTPUT"
           echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
 
       - name: Hash standalone script

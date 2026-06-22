@@ -49,10 +49,25 @@ jobs:
               - 'pyproject.toml'
               - 'justfile'
               - '.github/workflows/**'
+            zip:
+              - 'tools/build_zip.sh'
+              - '.github/workflows/release.yml'
+              - 'reservoarr.py'
+              - 'plugin/plugin.py'
+              - 'plugin/plugin.json'
+              - 'plugin/logo.png'
+              - 'LICENSE'
+              - 'README.md'
 
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
         with:
           python-version: '3.12'
+          # Cache the dev deps (pytest, pytest-xdist, ruff) keyed on
+          # pyproject.toml. Saves ~10-15s per run when the lockfile-ish
+          # contents are unchanged. Hit on every run that doesn't bump
+          # those deps; miss on Dependabot bumps (correctly).
+          cache: pip
+          cache-dependency-path: pyproject.toml
 
       - name: Install just
         uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3  # v4.0.0
@@ -86,6 +101,30 @@ jobs:
       - name: End-to-end tests
         if: steps.changes.outputs.code == 'true'
         run: just e2e
+
+      # Reproducibility check: tools/build_zip.sh must produce byte-identical
+      # zips on identical inputs. Superlab's Renovate pins the deployed
+      # plugin by sha256, so a recipe regression would break the deploy
+      # path. Runs only on PRs touching zip-contents or the build recipe.
+      # Two builds with the same SOURCE_DATE_EPOCH but separated by a
+      # touch on the source files — if the zip recipe leaks runner state
+      # (mtime, sort order, xattrs), the second sha will differ.
+      - name: Reproducibility check (zip)
+        if: steps.changes.outputs.zip == 'true'
+        run: |
+          set -eu
+          export VERSION=0.0.0-ci
+          export SOURCE_DATE_EPOCH=1700000000
+          SHA1=$(./tools/build_zip.sh)
+          rm -rf stage reservoarr-${VERSION}.zip
+          # Bump source-file mtimes so a recipe that forgot to pin them would diverge.
+          find reservoarr.py plugin LICENSE README.md -type f -exec touch {} +
+          SHA2=$(./tools/build_zip.sh)
+          if [ "$SHA1" != "$SHA2" ]; then
+            echo "::error::zip recipe is not reproducible: sha1=$SHA1 sha2=$SHA2"
+            exit 1
+          fi
+          echo "::notice::zip recipe reproducible: $SHA1"
 
       - name: Note skipped heavy steps
         if: steps.changes.outputs.code != 'true'
