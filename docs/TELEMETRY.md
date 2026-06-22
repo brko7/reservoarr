@@ -5,7 +5,7 @@
 ## Stats line
 
 ```
-2026-06-14T10:03:33+0200 [500004175] cushion=27s(pcr) buf=15.5MB out=4.66Mbps in=4.96Mbps crate=4.80Mbps in_total=1843MB reconnects=0 ccerr=0 pcrrej=0 disc=0 sync=0
+2026-06-14T10:03:33+0200 [500004175] cushion=27s(pcr) buf=15.5MB out=4.66Mbps in=4.96Mbps crate=4.80Mbps in_total=1843MB reconnects=0 ccerr=0 pcrrej=0 disc=0 sync=0 pcr_back=0
 ```
 
 | Field | Meaning |
@@ -18,6 +18,7 @@
 | `in_total=…MB` | Lifetime bytes ingested. |
 | `reconnects=N` | Upstream reconnects this session. |
 | `ccerr/pcrrej/disc/sync` | TS continuity-counter errors / rejected PCR samples (garbage timestamps) / spec-legal discontinuities / sync losses. Healthy = flat zero. |
+| `pcr_back=N` | Backward PCR jumps > 0.5s (CDN overlap-replay signal — provider re-served N seconds of content). Each event also emits a `pcr backward jump: -Xs (last=… cur=…)` log line. Log-only; pacing is unchanged. Healthy = flat zero. |
 
 ## Lifecycle events
 
@@ -32,6 +33,7 @@ Same file, free-form lines:
 | `corrupt-loop detected in stream (dts=N x3) - forcing upstream reconnect + buffer flush` | ffmpeg-stderr-side detector: same `dts` reported 3× in 120s. |
 | `TS corruption detected (...)` | #5 ingest-side detector, ARMED (`RESV_TS_RECONNECT=1`). |
 | `would-fire: TS corruption detected (...)` | #5 ingest-side detector, log-only (`RESV_TS_RECONNECT=0` — default). |
+| `pcr backward jump: -Xs (last=A cur=B)` | Upstream PCR went backward by more than 0.5s — usually a CDN serving overlapping content. Log-only signal; pacing/dedup unchanged. The corresponding telemetry-line counter is `pcr_back=N`. |
 | `flushed reservoir after corrupt-loop reconnect` | Confirms the buffer was emptied (poisoned content discarded). |
 | `prefill done: NMB in Ns, releasing stream to ffmpeg` | Once-per-stream startup line. |
 | `stream wrapper exit (ffmpeg rc=N)` | Final line on shutdown. |
@@ -42,7 +44,7 @@ After the first ~60s of a stream:
 
 - `cushion=` should reach `~25–30s(pcr)` and hold there. `(byte)` is OK during the first 15s; if it stays `(byte)` for minutes the PCR clock never locked — check `pcrrej`.
 - `out=` ≈ `crate=` ± a few percent. `out` higher than `crate` means the controller is bleeding the cushion (transient OK after reconnect; sustained = misconfigured).
-- `ccerr`, `pcrrej`, `disc`, `sync` flat at 0. Any non-zero is a corruption signal worth investigating.
+- `ccerr`, `pcrrej`, `disc`, `sync`, `pcr_back` flat at 0. Any non-zero is a corruption signal worth investigating. `pcr_back` specifically points at CDN overlap-replay (some edges send the same N seconds twice); the player perceives this as a "rewind".
 - `reconnects=0` for the first hour or so unless your provider is one of the unreliable ones; an occasional reconnect is fine, a reconnect every few minutes is not.
 
 ## Reading the log in production
