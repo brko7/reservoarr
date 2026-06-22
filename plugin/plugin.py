@@ -22,7 +22,7 @@ from core.models import StreamProfile
 
 class Plugin:
     name = "reservoarr"
-    version = "6.2.3"
+    version = "6.3.0"
     description = "Delay-buffer stream profile that absorbs IPTV CDN gaps so Plex Live TV stops dying"
     author = "brko7"
     help_url = "https://github.com/brko7/reservoarr"

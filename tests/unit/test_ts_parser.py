@@ -191,6 +191,46 @@ def test_pcr_garbage_delta_rejected(resv):
     assert p.cum_pcr == before
 
 
+def test_pcr_backward_jump_counts(resv):
+    """A backward PCR jump > 0.5s is the CDN overlap-replay signature (provider
+    re-serves N seconds of content). Counted into pcr_back for telemetry; the
+    sample is still rejected by the existing 0<delta<10s gate, so pacing is
+    unchanged. Earned by 2026-06-22 morning: edge 5.253.85.204 served three
+    13-27s rewinds in 8 min on a Nick Jr stream."""
+    p = resv.TsParser()
+    p.synced = True
+    # Anchor at t=100s, then a 21s rewind back to t=79s (matches 2026-06-22T07:14:01).
+    p.feed(_ts_packet(pid=0x100, cc=0, adaptation=True, pcr_base=90000 * 100))
+    assert p.pcr_back == 0
+    p.feed(_ts_packet(pid=0x100, cc=1, adaptation=True, pcr_base=90000 * 79))
+    assert p.pcr_back == 1, f"pcr_back={p.pcr_back} (want 1)"
+    # The sample is still garbage by the existing gate -> rejected, cum_pcr unchanged.
+    assert p.pcr_rejects == 1
+
+
+def test_pcr_small_backward_jitter_not_counted(resv):
+    """A < 0.5s backward jitter is sub-frame noise, not a real overlap-replay.
+    The threshold filters it out so the counter only registers meaningful events."""
+    p = resv.TsParser()
+    p.synced = True
+    p.feed(_ts_packet(pid=0x100, cc=0, adaptation=True, pcr_base=90000 * 10))         # t=10s
+    p.feed(_ts_packet(pid=0x100, cc=1, adaptation=True, pcr_base=90000 * 10 - 9000))  # t=9.9s (-0.1s)
+    assert p.pcr_back == 0, f"pcr_back={p.pcr_back} (want 0)"
+
+
+def test_pcr_wrap_not_counted_as_backward(resv):
+    """PCR base wraps every ~26.5h. A wrap looks like a huge negative raw delta
+    (last=2^33-eps, cur=eps). The detector must distinguish a real rewind from
+    a wrap; wrap = raw < -TS_WRAP_S/2, ignored."""
+    p = resv.TsParser()
+    p.synced = True
+    # Anchor near end of the 33-bit PCR base range.
+    p.feed(_ts_packet(pid=0x100, cc=0, adaptation=True, pcr_base=(1 << 33) - 90000))   # t=wrap-1s
+    # Wrap forward by ~1s -> raw signed delta is hugely negative, but it's a wrap.
+    p.feed(_ts_packet(pid=0x100, cc=1, adaptation=True, pcr_base=90000))               # t=1s (after wrap)
+    assert p.pcr_back == 0, f"pcr_back={p.pcr_back} (want 0; wrap, not rewind)"
+
+
 def test_pcr_normal_delta_accepted(resv):
     """A plausible PCR delta (~0.04s — one frame at 25fps) is normal."""
     p = resv.TsParser()

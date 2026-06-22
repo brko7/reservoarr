@@ -140,6 +140,7 @@ class TsParser:
         self.sync_losses = 0
         self.pcr_rejects = 0
         self.pcr_disc = 0
+        self.pcr_back = 0                                             # backward PCR jumps (CDN overlap-replay signal)
         self.cum_pcr = 0.0
         self.rate_marks = deque()                                     # (in_total, cum_pcr), ~90s content span
         self.cush_marks = deque()                                     # (in_total, cum_pcr), popped as released
@@ -230,6 +231,11 @@ class TsParser:
             self.pcr_disc += 1
             self.last_pcr = pcr                                       # legal jump: re-anchor, no cum advance
             return
+        raw = pcr - self.last_pcr                                     # signed: small negatives = real rewind,
+        if -TS_WRAP_S / 2 < raw < -0.5:                               # large negatives = wrap aliasing (ignore)
+            self.pcr_back += 1
+            log(f"pcr backward jump: {raw:.1f}s "
+                f"(last={self.last_pcr:.1f} cur={pcr:.1f})", stderr=False)
         delta = (pcr - self.last_pcr) % TS_WRAP_S
         if 0.0 < delta < 10.0:
             self.reject_run = 0
@@ -555,7 +561,8 @@ def main():
                     f"out={orate * 8 / 1e6:.2f}Mbps in={in_rate() * 8 / 1e6:.2f}Mbps "
                     f"crate={(crate or 0) * 8 / 1e6:.2f}Mbps in_total={in_total / 1e6:.0f}MB "
                     f"reconnects={reconnects} ccerr={parser.cc_errors} "
-                    f"pcrrej={parser.pcr_rejects} disc={parser.pcr_disc} sync={parser.sync_losses}",
+                    f"pcrrej={parser.pcr_rejects} disc={parser.pcr_disc} sync={parser.sync_losses} "
+                    f"pcr_back={parser.pcr_back}",
                     stderr=False)
                 # #5 ingest-side corruption detector: sustained CC/sync errors
                 # while bytes still flow => wedged/corrupt upstream (fires ~30s
