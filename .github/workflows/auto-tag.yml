@@ -1,0 +1,123 @@
+name: auto-tag
+
+# Cuts the annotated tag when a squash-merge with a `vX.Y.Z …` subject lands
+# on main, then dispatches release.yml (the existing reproducible-zip build).
+# Skips quietly on non-release commits. Fails loud on drift between the
+# commit subject and pyproject.toml — that's the v6.2.0/v6.2.1 incident
+# class (see docs/INVARIANTS.md #11).
+#
+# Auth note: tags on this repo are NOT covered by the `main` ruleset
+# (ruleset 17943058 scopes only refs/heads/main), so the default
+# GITHUB_TOKEN can push them. BUT events created by GITHUB_TOKEN do not
+# trigger further workflows — so we tag with GITHUB_TOKEN AND then
+# explicitly dispatch release.yml via `gh workflow run`. release.yml
+# already supports this through its workflow_dispatch.inputs.tag input,
+# which is also the manual escape hatch operators rely on.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write   # push the tag
+  actions: write    # gh workflow run release.yml
+
+concurrency:
+  group: auto-tag-${{ github.ref }}
+  cancel-in-progress: false   # never cancel a tag mid-push
+
+jobs:
+  tag:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          fetch-depth: 0   # need full tag history for monotonicity check + annotated-tag body
+
+      - name: Detect release commit + tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SUBJECT: ${{ github.event.head_commit.message }}
+        run: |
+          set -euo pipefail
+
+          # Only the first line of the commit message is the subject.
+          SUBJECT_LINE="$(printf '%s\n' "$SUBJECT" | head -1)"
+          echo "subject: $SUBJECT_LINE"
+
+          PP_VERSION=$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          echo "pyproject version: $PP_VERSION"
+
+          # Latest existing tag (for monotonicity + drift warnings). Empty
+          # string if no tags yet — handled by the comparisons below.
+          LATEST_TAG=$(git tag -l 'v*' --sort=-v:refname | head -1 || true)
+          echo "latest tag: ${LATEST_TAG:-<none>}"
+
+          # Step 1: extract candidate version from subject.
+          if [[ "$SUBJECT_LINE" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)([[:space:]]|$) ]]; then
+            CAND="${BASH_REMATCH[1]}"
+            echo "candidate version: $CAND"
+          else
+            echo "::notice::commit subject does not start with vX.Y.Z; not a release commit"
+            # Drift warning: pyproject moved but subject didn't claim a release.
+            # Catches accidental version bumps from doc/refactor PRs.
+            if [ -n "$LATEST_TAG" ] && [ "$PP_VERSION" != "${LATEST_TAG#v}" ]; then
+              echo "::warning::pyproject.toml version $PP_VERSION differs from latest tag $LATEST_TAG but commit subject \"$SUBJECT_LINE\" does not start with v$PP_VERSION. No tag created. If this was a release commit, retag manually."
+            fi
+            exit 0
+          fi
+
+          # Step 2: subject/pyproject parity. Drift here is the silent-bump
+          # incident class — fail loud.
+          if [ "$CAND" != "$PP_VERSION" ]; then
+            echo "::error::subject claims v$CAND but pyproject.toml is $PP_VERSION. Fix one of them and re-merge."
+            exit 1
+          fi
+
+          TAG="v$CAND"
+
+          # Step 3: tag-exists short-circuit. Makes re-runs on the same
+          # commit idempotent (e.g., a Dependabot/Renovate push that
+          # accidentally re-triggers this workflow).
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "::notice::tag $TAG already exists, skipping"
+            exit 0
+          fi
+
+          # Step 4: monotonicity. Catches the case where pyproject.toml is
+          # manually edited downward (e.g., a botched revert).
+          if [ -n "$LATEST_TAG" ]; then
+            # `sort -V` orders by semver; if CAND sorted before LATEST_TAG
+            # or equals it, we're not strictly greater.
+            HIGHEST=$(printf '%s\n%s\n' "$LATEST_TAG" "$TAG" | sort -V | tail -1)
+            if [ "$HIGHEST" != "$TAG" ] || [ "$LATEST_TAG" = "$TAG" ]; then
+              echo "::error::candidate $TAG is not strictly greater than latest tag $LATEST_TAG"
+              exit 1
+            fi
+          fi
+
+          # Step 5: extract this version's CHANGELOG section, used as the
+          # annotated tag body so `git show <tag>` carries the same
+          # narrative the release page does.
+          awk -v ver="$CAND" '
+            $0 ~ "^## \\[" ver "\\]" { capture=1; print; next }
+            capture && /^## \[/ { exit }
+            capture { print }
+          ' CHANGELOG.md > changelog-section.md
+          if [ ! -s changelog-section.md ]; then
+            echo "::error::no CHANGELOG.md section found for [$CAND]"
+            exit 1
+          fi
+
+          # Step 6: tag + push. The 41898282 user-id is the canonical
+          # github-actions[bot] account.
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -F changelog-section.md
+          git push origin "$TAG"
+          echo "::notice::pushed tag $TAG"
+
+          # Step 7: dispatch release.yml. `gh workflow run` returns
+          # immediately; release.yml runs to completion async.
+          gh workflow run release.yml --ref "$TAG" -f tag="$TAG"
+          echo "::notice::dispatched release.yml for $TAG"
