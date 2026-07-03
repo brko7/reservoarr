@@ -23,8 +23,11 @@ def _fetcher_consume(mod):
 
 
 def _reset(mod):
-    mod.last_forced_flush = 0.0
-    mod.last_forced_stall = 0.0
+    # -inf, matching the module's own init: debounces compare against
+    # time.monotonic(), which can be <90s shortly after boot — 0.0 would
+    # make these tests flake on a freshly booted CI runner.
+    mod.last_forced_flush = float("-inf")
+    mod.last_forced_stall = float("-inf")
     mod.flush_pending = False
     mod.force_reconnect.clear()
 

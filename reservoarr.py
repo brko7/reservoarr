@@ -86,12 +86,19 @@ reconnects = 0
 upstream_eof = False
 stop = threading.Event()
 cond = threading.Condition()
-in_marks = deque()                                                    # (timestamp, in_total) samples
+# All interval math (pacing debt, watchdogs, debounces, rate windows) uses
+# time.monotonic(): time.time() is the wall clock, and a backward NTP step of
+# T seconds turned into a single time.sleep(T) inside the pacing loop - long
+# enough and the cushion drains while we sleep, starving the player. Wall
+# clock remains only in log-line timestamps.
+in_marks = deque()                                                    # (monotonic ts, in_total) samples
 cur_response = None                                                   # live urllib response (for forced close)
 force_reconnect = threading.Event()
-corrupt_seen = deque()                                                # (timestamp, dts) from ffmpeg stderr
-last_forced_flush = 0.0                                               # corrupt-loop / #5 debounce (flush=True)
-last_forced_stall = 0.0                                               # stall watchdog #4 debounce (flush=False)
+corrupt_seen = deque()                                                # (monotonic ts, dts) from ffmpeg stderr
+# Debounce anchors are -inf, not 0.0: monotonic time can be under 90s shortly
+# after host boot, and 0.0 would rate-limit the first forced reconnect then.
+last_forced_flush = float("-inf")                                     # corrupt-loop / #5 debounce (flush=True)
+last_forced_stall = float("-inf")                                     # stall watchdog #4 debounce (flush=False)
 flush_pending = False                                                 # sticky flush request: set by a flush caller, cleared by the fetcher after it flushes
 
 # Last path segment, for log tagging. Strip any query string and cap length so
@@ -100,14 +107,32 @@ STREAM_ID = URL.split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1][:48] or "stream"
 LOG_DIR = os.getenv("RESV_LOG_DIR", "/data/scripts/logs")              # Dispatcharr AIO container default
 os.makedirs(LOG_DIR, exist_ok=True)
 LOG_FILE = os.path.join(LOG_DIR, "delaybuf.log")
-try:
-    if os.path.getsize(LOG_FILE) > 10 * 1024 * 1024:
-        os.replace(LOG_FILE, LOG_FILE + ".1")
-except OSError:
-    pass
+LOG_ROTATE_BYTES = 10 * 1024 * 1024
+_log_writes = 0
+
+
+def _maybe_rotate():
+    """Rotate delaybuf.log past LOG_ROTATE_BYTES, keeping one .1. Called at
+    startup AND every 512th log() line: rotation used to run only at process
+    start, so a single long-lived tune (24/7 channel) grew the file unboundedly
+    until the next channel start. Cross-process safe: log() reopens per line,
+    and a concurrent rotator losing the os.replace race just raises ENOENT
+    here (swallowed)."""
+    try:
+        if os.path.getsize(LOG_FILE) > LOG_ROTATE_BYTES:
+            os.replace(LOG_FILE, LOG_FILE + ".1")
+    except OSError:
+        pass
+
+
+_maybe_rotate()
 
 
 def log(msg, stderr=True):
+    global _log_writes
+    _log_writes += 1
+    if _log_writes % 512 == 0:                                        # ~2h at stats cadence; ~5min under
+        _maybe_rotate()                                               # an ffmpeg-stderr storm
     line = f"{time.strftime('%Y-%m-%dT%H:%M:%S%z')} [{STREAM_ID}] {msg}"
     try:
         with open(LOG_FILE, "a") as f:
@@ -283,7 +308,7 @@ def in_rate():
     window ends at *now*, not the last arrival - ending at the last arrival
     excluded in-progress gaps and overstated the rate by ~4% on a bursty
     feed, which cancelled the 0.97 release floor (v5 cushion bug)."""
-    now = time.time()
+    now = time.monotonic()
     while len(in_marks) > 2 and now - in_marks[0][0] > RATE_WINDOW_S:
         in_marks.popleft()
     if len(in_marks) < 2:
@@ -302,7 +327,7 @@ def force_upstream_reconnect(reason, flush=True):
     away a corrupt flush; the flush request is sticky and is never downgraded by a
     concurrent no-flush. Returns True if it fired, False if rate-limited."""
     global last_forced_flush, last_forced_stall, flush_pending
-    now = time.time()
+    now = time.monotonic()
     with cond:
         if flush:
             if now - last_forced_flush <= 90:
@@ -329,24 +354,24 @@ def stall_watchdog():
     grab a fresh front-load while the good buffer keeps draining. STALL_S sits
     above the CDN's normal burst-gap so a normal gap never trips it."""
     last_in = -1
-    last_adv = time.time()
+    last_adv = time.monotonic()
     while not stop.wait(2):
         cur = in_total
         if cur != last_in:
             last_in = cur
-            last_adv = time.time()
-        elif time.time() - last_adv > STALL_S and not force_reconnect.is_set():
+            last_adv = time.monotonic()
+        elif time.monotonic() - last_adv > STALL_S and not force_reconnect.is_set():
             if force_upstream_reconnect(
-                    f"upstream stalled (no data {time.time() - last_adv:.0f}s) - reconnecting, buffer kept",
+                    f"upstream stalled (no data {time.monotonic() - last_adv:.0f}s) - reconnecting, buffer kept",
                     flush=False):
-                last_adv = time.time()
+                last_adv = time.monotonic()
 
 
 def register_corrupt(dts):
     """CDN edges sometimes wedge a single long-lived connection into serving
     the same corrupt packet in a loop, while fresh connections are clean
     (verified live 2026-06-12). Same dts reported 3x => reconnect + flush."""
-    now = time.time()
+    now = time.monotonic()
     corrupt_seen.append((now, dts))
     while corrupt_seen and now - corrupt_seen[0][0] > 120:
         corrupt_seen.popleft()
@@ -414,7 +439,7 @@ def fetcher():
                     buf.append(d)
                     buf_bytes += len(d)
                     in_total += len(d)
-                    in_marks.append((time.time(), in_total))
+                    in_marks.append((time.monotonic(), in_total))
                     cond.notify_all()
                 parser.feed(d)                                        # observe outside the lock
         except Exception as e:
@@ -475,11 +500,11 @@ def main():
     t = threading.Thread(target=fetcher, daemon=True)
     t.start()
 
-    t0 = time.time()
+    t0 = time.monotonic()
     with cond:
-        while buf_bytes < PREFILL_BYTES and time.time() - t0 < PREFILL_MAX_S and not stop.is_set():
+        while buf_bytes < PREFILL_BYTES and time.monotonic() - t0 < PREFILL_MAX_S and not stop.is_set():
             cond.wait(0.5)
-    log(f"prefill done: {buf_bytes / 1e6:.1f}MB in {time.time() - t0:.1f}s, releasing stream to ffmpeg")
+    log(f"prefill done: {buf_bytes / 1e6:.1f}MB in {time.monotonic() - t0:.1f}s, releasing stream to ffmpeg")
 
     ff = subprocess.Popen(FFMPEG_CMD, stdin=subprocess.PIPE, stdout=None, stderr=subprocess.PIPE, bufsize=0)
     threading.Thread(target=stderr_watcher, args=(ff,), daemon=True).start()
@@ -502,12 +527,12 @@ def main():
     signal.signal(signal.SIGINT, on_term)
 
     out_since_stats = 0
-    last_stats = time.time()
-    release_start = time.time()                                       # set once; intentionally NOT reset on
+    last_stats = time.monotonic()
+    release_start = time.monotonic()                                  # set once; intentionally NOT reset on
     #                                                                   reconnect (no per-seam headstart re-dump)
     headstart_bytes = 0                                               # byte backstop before PCR lock
     pace_debt = 0.0                                                   # seconds owed to pacing
-    last_pace = time.time()
+    last_pace = time.monotonic()
     prev_ccerr = prev_sync = prev_in_total = 0                        # #5 detector: per-window deltas
     ts_bad_wins = 0
     unaligned_tail = b""                                              # see align_to_188(): ffmpeg expects 188-aligned writes
@@ -516,7 +541,7 @@ def main():
             d, released_total = next_slice()
             if d is None:
                 break
-            now = time.time()
+            now = time.monotonic()
             crate = parser.content_rate()
             rate = crate if crate is not None else in_rate()
             cush_pcr = parser.cushion_s(released_total)
@@ -546,14 +571,14 @@ def main():
                 if pace_debt > 0.005:
                     time.sleep(pace_debt)
                     pace_debt = 0.0
-                    last_pace = time.time()
+                    last_pace = time.monotonic()
                 elif pace_debt < -2.0:
                     pace_debt = 0.0                                   # don't bank idle time
             aligned, unaligned_tail = align_to_188(unaligned_tail, d)
             if aligned:
                 ff.stdin.write(aligned)
                 out_since_stats += len(aligned)
-            now = time.time()
+            now = time.monotonic()
             if now - last_stats >= STATS_EVERY_S:
                 orate = out_since_stats / (now - last_stats)
                 src = "pcr" if cush_pcr is not None else "byte"
@@ -588,6 +613,15 @@ def main():
                 last_stats = now
     except (BrokenPipeError, OSError) as e:
         log(f"stream consumer gone ({type(e).__name__}); shutting down")
+    except ValueError:
+        # on_term (signal handler, runs in this thread) closes ff.stdin - the
+        # close is deliberate: it unblocks a write wedged on a full pipe. But
+        # if the signal lands between next_slice() and the write, the write
+        # hits a *closed* file object and raises ValueError, not OSError.
+        # Expected only during shutdown; anything else is a real bug.
+        if not stop.is_set():
+            raise
+        log("shutdown during write (ff.stdin closed by signal handler)")
     finally:
         stop.set()
         with cond:

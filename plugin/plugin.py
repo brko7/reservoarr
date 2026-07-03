@@ -22,7 +22,7 @@ from core.models import StreamProfile
 
 class Plugin:
     name = "reservoarr"
-    version = "6.3.0"
+    version = "6.3.1"
     description = "Delay-buffer stream profile that absorbs IPTV CDN gaps so Plex Live TV stops dying"
     author = "brko7"
     help_url = "https://github.com/brko7/reservoarr"
@@ -57,7 +57,7 @@ class Plugin:
         else:
             local = self._read_installed_version()
             packaged = self._parse_version(self.version)
-            if local is not None and packaged is not None and packaged > local:
+            if packaged is not None and (local is None or packaged > local):
                 self._install()
 
         self.fields = [
@@ -125,9 +125,12 @@ class Plugin:
 
     def _read_installed_version(self):
         """Read the version stamped by the most recent _install() into
-        <dst_dir>/.installed_version. None if missing or unparseable —
-        the upgrade gate in __init__ treats either as "no upgrade", which is
-        safe because a missing dst_script is handled separately."""
+        <dst_dir>/.installed_version. None if missing or unparseable — the
+        upgrade gate in __init__ treats that as "unknown: reinstall".
+        (_install() is an idempotent copy, so reinstalling is always safe.
+        Treating unknown as "no upgrade" wedged the auto-update path forever
+        whenever the sentinel write had failed while the script existed —
+        the sentinel write is suppress(OSError)-wrapped in _install().)"""
         sentinel = Path(self.dst_dir) / ".installed_version"
         try:
             return self._parse_version(sentinel.read_text().strip())

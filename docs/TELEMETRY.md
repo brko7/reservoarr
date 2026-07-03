@@ -1,6 +1,6 @@
 # Telemetry
 
-`{RESV_LOG_DIR}/delaybuf.log` (self-rotates at 10 MB, keeps one `.1`). One stats line every 15s per active stream, plus lifecycle events.
+`{RESV_LOG_DIR}/delaybuf.log` (self-rotates at 10 MB, keeps one `.1`; checked at stream start and every ~512 log lines while running). One stats line every 15s per active stream, plus lifecycle events.
 
 ## Stats line
 

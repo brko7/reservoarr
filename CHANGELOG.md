@@ -2,6 +2,20 @@
 
 All notable changes to `reservoarr.py`. Each version's invariants are earned by a real production failure — read this before changing the script.
 
+## [6.3.1] — 2026-07-03
+
+Hardening release from a full-repo review. Three runtime fixes in `reservoarr.py` plus one plugin install-gate fix. **No pacing/controller behaviour changes**; all invariants intact.
+
+- **Monotonic clock for all interval math.** Pacing debt, the #4 stall watchdog, the per-class reconnect debounces, and the arrival-rate window previously measured intervals on `time.time()` (wall clock). A backward NTP step of T seconds became a single `time.sleep(T)` inside the pacing loop — if T exceeded the remaining cushion, the player starved and the tune died; a forward step could false-trip the stall watchdog into a spurious (buffer-kept) reconnect. All interval measurements now use `time.monotonic()`; the wall clock remains only in log-line timestamps. The debounce anchors initialize to `-inf` rather than `0.0` because monotonic time can be under 90s shortly after host boot, which would otherwise rate-limit the first forced reconnect on a freshly booted machine.
+
+- **Clean shutdown when SIGTERM lands mid-pacing-loop.** `on_term` closes ffmpeg's stdin from the signal handler — deliberately, since that unblocks a write wedged on a full pipe. But when the signal lands between `next_slice()` and the write, the write executes against a *closed* file object and raises `ValueError`, which the `except (BrokenPipeError, OSError)` clause did not catch: every unlucky channel stop dumped a Python traceback into Dispatcharr's transcode log and exited nonzero. The window is a large fraction of loop wall-time (it includes the pacing sleep), so this was a routine occurrence, not a rarity. Now caught and logged as a normal shutdown; a `ValueError` raised while *not* shutting down still propagates — real bugs must stay loud.
+
+- **Log rotation runs continuously, not only at spawn.** The 10 MB rotation check ran once at process start, so a single long-lived tune (a 24/7 channel) grew `delaybuf.log` unboundedly until the *next* channel start — contradicting what `docs/TELEMETRY.md` promised. The check now also runs every 512th log line (~2h at stats cadence, ~5min under an ffmpeg-stderr storm; worst-case overshoot past 10 MB is under 100 KB). The open-per-write append pattern keeps it safe across concurrent streams; a process losing the `os.replace` race just swallows the ENOENT. New regression tests in `tests/unit/test_log_rotation.py` (import-time rotation, mid-run rotation, below-threshold no-op).
+
+- **Plugin upgrade gate: unknown installed version now reinstalls.** `plugin.py` treated a missing or unparseable `.installed_version` sentinel as "no upgrade needed". The sentinel write in `_install()` is `suppress(OSError)`-wrapped — if it ever failed once (transient read-only mount, disk full) while `reservoarr.py` existed, **no future version would ever auto-update the script, silently and permanently**: exactly the drift class invariant #11 exists to prevent. The gate now reinstalls whenever the local version is unknown; `_install()` is an idempotent copy, so the repair costs nothing and self-heals the sentinel on the next successful write.
+
+- All 58 unit + 7 e2e tests pass. `docs/TELEMETRY.md` rotation note updated.
+
 ## [6.3.0] — 2026-06-22
 
 Observability: CDN overlap-replay detector (log-only).
