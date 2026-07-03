@@ -24,24 +24,30 @@ jobs:
 
       - name: Resolve version
         id: ver
+        # The ref name reaches the shell via env, not inline ${{ }} — a
+        # crafted tag name (refnames may contain ;, $, quotes) must not be
+        # able to inject into the run script.
+        env:
+          REF_INPUT: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
           # Strip leading 'v' from the tag for filename use.
-          REF="${{ github.event.inputs.tag || github.ref_name }}"
-          VERSION="${REF#v}"
+          VERSION="${REF_INPUT#v}"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "tag=$REF" >> "$GITHUB_OUTPUT"
+          echo "tag=$REF_INPUT" >> "$GITHUB_OUTPUT"
 
       - name: Verify version sync + tag match
         # The plugin's upgrade gate compares plugin.py's `version` against the
         # .installed_version sentinel; drift between pyproject.toml,
         # plugin/plugin.json, plugin/plugin.py, and the git tag silently breaks
         # the upgrade path for users installing the zip.
+        env:
+          TAG_VERSION: ${{ steps.ver.outputs.version }}
         run: |
           set -eu
           python3 tools/check_versions.py
           PP_VERSION=$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
-          if [ "$PP_VERSION" != "${{ steps.ver.outputs.version }}" ]; then
-            echo "TAG MISMATCH: tag=${{ steps.ver.outputs.version }} pyproject=$PP_VERSION" >&2
+          if [ "$PP_VERSION" != "$TAG_VERSION" ]; then
+            echo "TAG MISMATCH: tag=$TAG_VERSION pyproject=$PP_VERSION" >&2
             exit 1
           fi
 
@@ -52,11 +58,12 @@ jobs:
         # twice on identical inputs to verify byte-identity holds.
         # SOURCE_DATE_EPOCH is pinned to the tag commit's timestamp here
         # so rebuilding the same tag always produces the same zip.
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          TAG: ${{ steps.ver.outputs.tag }}
         run: |
           set -eu
-          VERSION="${{ steps.ver.outputs.version }}"
-          export VERSION
-          export SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct "${{ steps.ver.outputs.tag }}")
+          export SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct "$TAG")
           SHA256=$(./tools/build_zip.sh)
           echo "out=reservoarr-${VERSION}.zip" >> "$GITHUB_OUTPUT"
           echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
@@ -82,7 +89,7 @@ jobs:
 
           ## Install
 
-          **Dispatcharr plugin (recommended):** Dispatcharr → Plugins → Find Plugins → search "reservoarr" → Install. Once the registry submission is accepted, this URL is the source the registry pulls from.
+          **Dispatcharr plugin (recommended):** Dispatcharr → Plugins → Find Plugins → search "reservoarr" → Install. reservoarr is listed in the [Dispatcharr/Plugins](https://github.com/Dispatcharr/Plugins) registry; this zip is the artifact the registry pulls and re-publishes.
 
           **Manual:** download `reservoarr.py`, drop into `/data/scripts/reservoarr.py` inside the Dispatcharr container, `chmod +x`, add a Stream Profile pointing at it. See [README](https://github.com/brko7/reservoarr/blob/${{ steps.ver.outputs.tag }}/README.md#install) for full instructions.
 

@@ -13,6 +13,7 @@ dependencies = []
 [project.optional-dependencies]
 dev = [
     "pytest>=8",
+    "pytest-timeout>=2",
     "pytest-xdist>=3",
     "ruff>=0.6",
 ]
@@ -35,6 +36,10 @@ exclude = ["*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra --strict-markers"
+# Hard per-test cap: a wedged e2e pipeline (hung ffmpeg, harness deadlock)
+# must fail in minutes, not stall CI until the 6h job timeout. The slowest
+# e2e test is ~90s; 180s leaves 2x headroom.
+timeout = 180
 markers = [
     "e2e: requires ffmpeg; spawns subprocesses; slower (~45-85s each, run in parallel via xdist)",
 ]

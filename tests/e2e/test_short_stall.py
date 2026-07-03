@@ -10,8 +10,9 @@ from .harness import run_pipeline
 
 @pytest.mark.e2e
 def test_12s_stall_absorbed(tmp_path, synth_ts):
-    """Introduce a 12s stall at t=30s; cushion should dip but output keeps flowing.
-    The #4 watchdog must NOT fire (STALL_S=25 > 12)."""
+    """Introduce a 12s stall at edge time 30 (~5s wall — the edge clock starts
+    at front=25); cushion should dip but output keeps flowing. The #4 watchdog
+    must NOT fire (STALL_S=25 > 12)."""
     run = run_pipeline(
         tmp_path, synth_ts, rate_bps=300_010, duration_s=75,
         stalls=[(30.0, 12.0)],

@@ -61,7 +61,10 @@ jobs:
 
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
         with:
-          python-version: '3.12'
+          # Match the Python that actually runs in production: the Dispatcharr
+          # AIO container ships 3.13.x. The 3.11 floor (requires-python) is
+          # covered by ruff's target-version=py311 syntax gating.
+          python-version: '3.13'
           # Cache the dev deps (pytest, pytest-xdist, ruff) keyed on
           # pyproject.toml. Saves ~10-15s per run when the lockfile-ish
           # contents are unchanged. Hit on every run that doesn't bump
@@ -77,7 +80,7 @@ jobs:
 
       # Always run — cheap (<5s), and version-check catches plugin.json
       # drift that would silently break the plugin upgrade path.
-      - name: Version sync (pyproject ↔ plugin.json ↔ plugin.py)
+      - name: Version sync (pyproject ↔ plugin.json ↔ plugin.py ↔ CHANGELOG section)
         run: just version-check
 
       - name: Lint + syntax
