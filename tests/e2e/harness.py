@@ -55,7 +55,7 @@ class Run:
     def stats_lines(self) -> list[dict]:
         """Parse the delaybuf.log telemetry lines into dicts.
         Format: cushion=Ns(pcr) buf=…MB out=…Mbps in=…Mbps crate=…Mbps in_total=…MB
-                reconnects=N ccerr=N pcrrej=N disc=N sync=N
+                reconnects=N ccerr=N pcrrej=N disc=N sync=N pcr_back=N
         """
         pat = re.compile(
             r"cushion=(?P<cushion>\d+)s\((?P<src>pcr|byte)\)\s+"
@@ -68,7 +68,8 @@ class Run:
             r"ccerr=(?P<ccerr>\d+)\s+"
             r"pcrrej=(?P<pcrrej>\d+)\s+"
             r"disc=(?P<disc>\d+)\s+"
-            r"sync=(?P<sync>\d+)"
+            r"sync=(?P<sync>\d+)\s+"
+            r"pcr_back=(?P<pcr_back>\d+)"
         )
         out = []
         for line in self.log_file.read_text().splitlines():
@@ -97,7 +98,13 @@ def run_pipeline(
     corrupt_rate: int = 5,
 ) -> Run:
     """Run cdn_sim + reservoarr.py for duration_s seconds; return collected
-    artifacts. Caller asserts on Run.stats_lines() / Run.log_text() / out_ts."""
+    artifacts. Caller asserts on Run.stats_lines() / Run.log_text() / out_ts.
+
+    TIMEBASE: cdn_sim event times (stalls, eof_at, corrupt_from) are on the
+    sim's *edge clock*, which starts at front_s — the edge pretends front_s
+    seconds of content already exist when the server starts. Wall-clock time
+    of an event ≈ its edge time minus front_s. E.g. with front_s=25, a stall
+    at 30 begins ~5s after the client connects."""
     port = _free_port()
     out_ts = tmp_path / "out.ts"
     log_dir = tmp_path / "logs"
@@ -114,6 +121,12 @@ def run_pipeline(
         cdn_argv += ["--corrupt-from", str(corrupt_from), "--corrupt-rate", str(corrupt_rate)]
 
     env = os.environ.copy()
+    # Strip any RESV_* tuning from the developer's shell so a stray export
+    # (e.g. RESV_TS_RECONNECT=1, RESV_STALL_S) can't change test behaviour.
+    # RESV_FFMPEG_BIN is kept: it's a path, not a tunable, and the justfile
+    # sets it deliberately.
+    for k in [k for k in env if k.startswith("RESV_") and k != "RESV_FFMPEG_BIN"]:
+        env.pop(k)
     env["RESV_LOG_DIR"] = str(log_dir)
     # Use the ffmpeg path the test runner picked (mac vs linux differ).
     if "RESV_FFMPEG_BIN" not in env:
@@ -163,10 +176,13 @@ def run_pipeline(
 
 def ffprobe_streams(path: Path) -> list[dict]:
     """Return the streams from `ffprobe -show_streams` as a list of dicts.
-    Uses JSON output to avoid the wrapper-vs-no-wrapper parsing gotcha."""
+    Uses JSON output to avoid the wrapper-vs-no-wrapper parsing gotcha.
+    Honours FFPROBE_BIN (exported by the justfile's e2e recipe) so sandboxed
+    runs with a stripped PATH still find the binary."""
     import json
+    ffprobe = os.environ.get("FFPROBE_BIN") or shutil.which("ffprobe") or "ffprobe"
     out = subprocess.check_output(
-        ["ffprobe", "-v", "error", "-show_streams", "-of", "json", str(path)],
+        [ffprobe, "-v", "error", "-show_streams", "-of", "json", str(path)],
         text=True,
     )
     return json.loads(out).get("streams", [])

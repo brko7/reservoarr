@@ -42,12 +42,17 @@ def main():
     ap.add_argument("--port", type=int, default=8099)
     ap.add_argument("--front", type=float, default=25.0,
                     help="seconds of front-load backlog per connection")
+    # NOTE: all event times below are on the EDGE CLOCK, which starts at
+    # --front (the edge pretends `front` seconds of content already exist at
+    # server start, so each connection gets an instant backlog). Wall-clock
+    # time of an event = its edge time minus front. A value below `front`
+    # means "active from the first served byte".
     ap.add_argument("--stall", action="append", default=[],
-                    help="stall window 'start:duration' in seconds since server start; repeatable")
+                    help="stall window 'start:duration' on the edge clock (wall time = start - front); repeatable")
     ap.add_argument("--eof-at", type=float, default=0.0,
-                    help="force one EOF at this many seconds (0 = never)")
+                    help="force one EOF at this edge-clock time (0 = never; wall time = value - front)")
     ap.add_argument("--corrupt-from", type=float, default=0.0,
-                    help="start CC-field corruption injection at this many seconds (0 = off)")
+                    help="start CC-field corruption at this edge-clock time (0 = off; below `front` = from first byte)")
     ap.add_argument("--corrupt-rate", type=int, default=5,
                     help="how many packets per 15s to corrupt (matches real-incident rate)")
     args = ap.parse_args()

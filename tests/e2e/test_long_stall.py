@@ -10,8 +10,9 @@ from .harness import run_pipeline
 
 @pytest.mark.e2e
 def test_30s_stall_trips_watchdog_no_flush(tmp_path, synth_ts):
-    """Stall for 30s starting at t=35; #4 should fire, log a 'reconnecting,
-    buffer kept' line, and the fetcher should not flush the reservoir."""
+    """Stall for 30s starting at edge time 35 (~10s wall — the edge clock
+    starts at front=25); #4 should fire, log a 'reconnecting, buffer kept'
+    line, and the fetcher should not flush the reservoir."""
     run = run_pipeline(
         tmp_path, synth_ts, rate_bps=300_010, duration_s=85,
         stalls=[(35.0, 30.0)],

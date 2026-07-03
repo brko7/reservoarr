@@ -10,7 +10,8 @@ from .harness import run_pipeline
 
 @pytest.mark.e2e
 def test_eof_clean_reconnect(tmp_path, synth_ts):
-    """Force EOF at t=40s. We should see a clean 'upstream EOF' followed by
+    """Force EOF at edge time 40 (~15s wall — the edge clock starts at
+    front=25). We should see a clean 'upstream EOF' followed by
     'upstream connected'; no AttributeError, no NoneType errors."""
     run = run_pipeline(
         tmp_path, synth_ts, rate_bps=300_010, duration_s=75, eof_at=40.0,

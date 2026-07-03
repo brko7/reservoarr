@@ -27,14 +27,18 @@ By participating, you agree to follow this project's [Code of Conduct](CODE_OF_C
 ```bash
 just venv       # one-time: create .venv with pytest + ruff + pytest-xdist
 just fixture    # generate fixtures/synth.ts (deterministic, ~2s, needs ffmpeg)
-just test       # unit tests (52 tests, ~1s, no ffmpeg)
-just e2e        # synthetic end-to-end (7 tests, ~90s wall-clock with xdist -n auto, needs ffmpeg)
+just test       # unit tests (~1s, no ffmpeg)
+just e2e        # synthetic end-to-end (~90s wall-clock with xdist -n auto, needs ffmpeg)
 just all        # lint + unit + e2e
 ```
 
 The fixture and e2e tests are provider-independent: they spawn `tools/cdn_sim.py` as a real HTTP server and replay a synthetic TS file with the IPTorrents delivery shape. No live CDN, no captured streams in CI.
 
 On macOS dev hosts, set `RESV_FFMPEG_BIN=/opt/homebrew/bin/ffmpeg` if `which ffmpeg` doesn't return `/usr/local/bin/ffmpeg`.
+
+## Releases
+
+Version bumps and the release pipeline (auto-tag on `vX.Y.Z` squash-merges, reproducible zip, registry propagation) are documented in [docs/RELEASING.md](docs/RELEASING.md). Contributors don't cut releases — the maintainer does — but if your PR bumps the version, the four sync points listed there must all move together (CI enforces it).
 
 ## What changes look like
 
