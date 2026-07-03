@@ -17,8 +17,8 @@ body:
     id: version
     attributes:
       label: reservoarr version
-      description: What does `sha256sum reservoarr.py` say? Match it against a release in `CHANGELOG.md`.
-      placeholder: "v6.2.1 (sha 4f61fe0e…)"
+      description: What does `sha256sum reservoarr.py` say? Match it against the sha256 table in the release body on the [releases page](https://github.com/brko7/reservoarr/releases).
+      placeholder: "v6.3.0 (sha 9b18cdf4…)"
     validations:
       required: true
   - type: input
@@ -47,7 +47,7 @@ body:
     id: env
     attributes:
       label: RESV_* env settings
-      description: Any overrides? Defaults match v6.1 production behaviour.
+      description: Any overrides? Defaults are unchanged since v6.1.
       render: bash
       placeholder: "RESV_TARGET_S=30  RESV_TS_RECONNECT=0  (defaults)"
   - type: dropdown

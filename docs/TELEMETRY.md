@@ -34,7 +34,9 @@ Same file, free-form lines:
 | `TS corruption detected (...)` | #5 ingest-side detector, ARMED (`RESV_TS_RECONNECT=1`). |
 | `would-fire: TS corruption detected (...)` | #5 ingest-side detector, log-only (`RESV_TS_RECONNECT=0` — default). |
 | `pcr backward jump: -Xs (last=A cur=B)` | Upstream PCR went backward by more than 0.5s — usually a CDN serving overlapping content. Log-only signal; pacing/dedup unchanged. The corresponding telemetry-line counter is `pcr_back=N`. |
-| `flushed reservoir after corrupt-loop reconnect` | Confirms the buffer was emptied (poisoned content discarded). |
+| `flushed reservoir after corrupt-loop reconnect` | Confirms the buffer was emptied (poisoned content discarded). Emitted after any flush-requesting reconnect — the corrupt-loop detector or an armed #5 firing. |
+| `ffmpeg: <line>` | ffmpeg's stderr, relayed line-by-line (this is what the `grep -v "ffmpeg:"` recipes strip). |
+| `stream consumer gone (<Type>); shutting down` | Dispatcharr closed our stdout (viewer stopped the channel); clean exit follows. |
 | `prefill done: NMB in Ns, releasing stream to ffmpeg` | Once-per-stream startup line. |
 | `stream wrapper exit (ffmpeg rc=N)` | Final line on shutdown. |
 
