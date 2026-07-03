@@ -30,3 +30,6 @@ tests/e2e/.tmp/
 
 # Local drafts (Reddit posts, announcement copy, etc.) — not part of the project
 drafts/
+
+# Session handoff notes (operator-local, contain private ops detail — never publish)
+handoff-*.md

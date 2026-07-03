@@ -1,6 +1,6 @@
 # Tunables
 
-All defaults reproduce the v6.1 production behaviour. **Override only with evidence** — the defaults are calibrated against real incidents (see the [CHANGELOG](../CHANGELOG.md)).
+Defaults are unchanged since v6.1 and calibrated against real incidents (see the [CHANGELOG](../CHANGELOG.md)). **Override only with evidence.**
 
 | Env var | Default | What it does |
 |---|---|---|

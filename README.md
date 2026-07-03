@@ -65,8 +65,8 @@ The pattern below — `get_url` of a tagged release with a sha256 checksum, Reno
 ```yaml
 # defaults/main.yml
 # renovate: datasource=github-releases depName=brko7/reservoarr
-reservoarr_version: 6.2.3
-reservoarr_sha256: <fill from release>
+reservoarr_version: "X.Y.Z"   # latest from the releases page
+reservoarr_sha256: <fill from release body>
 ```
 
 ```yaml
@@ -105,12 +105,12 @@ tail -F /data/scripts/logs/delaybuf.log | grep "cushion="
 You should see one stats line per active stream every 15 seconds. The shape is:
 
 ```
-2026-06-21T10:03:33+0000 [500004175] cushion=27s(pcr) buf=15.5MB out=4.66Mbps in=4.96Mbps crate=4.80Mbps in_total=1843MB reconnects=0 ccerr=0 pcrrej=0 disc=0 sync=0
+2026-06-21T10:03:33+0000 [500004175] cushion=27s(pcr) buf=15.5MB out=4.66Mbps in=4.96Mbps crate=4.80Mbps in_total=1843MB reconnects=0 ccerr=0 pcrrej=0 disc=0 sync=0 pcr_back=0
 ```
 
 **Healthy after ~60s:**
 - `cushion=` reaches `~25–30s(pcr)` and oscillates within ±6s of that. The `(pcr)` suffix means the cushion is measured off the PCR clock (good); `(byte)` is a degraded fallback.
-- `ccerr`, `pcrrej`, `disc`, `sync` flat at zero.
+- `ccerr`, `pcrrej`, `disc`, `sync`, `pcr_back` flat at zero.
 - `reconnects=0` unless your provider is one of the unreliable ones.
 - `out=` ≈ `crate=` ± a few percent.
 
@@ -195,16 +195,16 @@ Deeper reading:
 ```bash
 just venv       # one-time: create .venv with pytest + ruff + pytest-xdist
 just fixture    # generate fixtures/synth.ts (deterministic, ~2s)
-just test       # unit tests (52 tests, ~1s)
-just e2e        # synthetic end-to-end (7 tests, ~90s wall-clock with xdist -n auto)
+just test       # unit tests (~1s)
+just e2e        # synthetic end-to-end (~90s wall-clock with xdist -n auto)
 just all        # lint + unit + e2e
 ```
 
-- **Unit tests** (52): `TsParser` (PCR extraction, wrap-aware delta, CC continuity, sync recovery, content rate vs ffprobe truth on the fixture), pacing controller math, reconnect-precedence state machine, #5 detector rule replay against the real 2026-06-14 incident signature, and TS-packet alignment regression coverage (v6.2.1 fix).
-- **End-to-end tests** (7): spawn `tools/cdn_sim.py` as a real HTTP server and `reservoarr.py` as a real subprocess, with the system ffmpeg. Asserts cushion build, PCR clock lock, 12s stall absorbed, >25s stall trips the watchdog without flushing, forced EOF reconnects cleanly, CC corruption logs `would-fire:` with zero false positives.
-- **CI**: GitHub Actions runs lint + unit + e2e on every push/PR — provider-independent (synthetic fixture only).
+- **Unit tests**: `TsParser` (PCR extraction, wrap-aware delta, backward-jump detection, CC continuity, sync recovery, content rate vs ffprobe truth on the fixture), pacing controller math, reconnect-precedence state machine, #5 detector rule replay against the real 2026-06-14 incident signature, and TS-packet alignment regression coverage (v6.2.1 fix).
+- **End-to-end tests**: spawn `tools/cdn_sim.py` as a real HTTP server and `reservoarr.py` as a real subprocess, with the system ffmpeg. Asserts cushion build, PCR clock lock, 12s stall absorbed, >25s stall trips the watchdog without flushing, forced EOF reconnects cleanly, CC corruption logs `would-fire:` with zero false positives.
+- **CI**: GitHub Actions runs lint + version-sync on every push/PR, plus unit + e2e whenever code changes — provider-independent (synthetic fixture only).
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) before opening a PR.
+See [CONTRIBUTING.md](CONTRIBUTING.md) before opening a PR, and [docs/RELEASING.md](docs/RELEASING.md) for how releases are cut.
 
 ## Tools
 
@@ -215,6 +215,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) before opening a PR.
 | `tools/make_corrupt_ts.py` | Standalone CC-corruption generator (alternative to cdn_sim's in-band injection). |
 | `tools/parsecheck.py` | Feeds a captured TS file through `TsParser` and compares the PCR-derived duration/rate to ffprobe truth. Useful for validating real CDN captures. |
 | `tools/smoke_channel.sh` | Manual ops: tune a Dispatcharr channel end-to-end through the proxy and dump the reservoir telemetry. Parameterized via env (`HOST`, `CONTAINER`, `PROXY_BASE`, `LOG_PATH`) — not CI-runnable. |
+| `tools/build_zip.sh` | Single source of truth for the reproducible plugin-zip recipe. Called by `release.yml` and by CI's reproducibility check. |
+| `tools/check_versions.py` | Version-sync gate: asserts `pyproject.toml` ↔ `plugin/plugin.json` ↔ `plugin/plugin.py` parity and a matching `CHANGELOG.md` section. Runs in `just lint` and CI. |
 
 ## Support & community
 
