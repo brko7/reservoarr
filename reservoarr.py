@@ -68,9 +68,16 @@ STALL_S = float(os.getenv("RESV_STALL_S", "25"))                      # no-inges
 TS_WRAP_S = (1 << 33) / 90000.0                                       # PCR base wraps every ~26.5h
 
 FFMPEG_BIN = os.getenv("RESV_FFMPEG_BIN", "/usr/local/bin/ffmpeg")    # Dispatcharr AIO container default
+# No `-fflags +nobuffer`: it costs the whole first GOP of video. The demuxer
+# hands packets on before it has the video's parameter sets, so ffmpeg emits
+# audio from the first sample and video only from the next IDR. On a channel
+# with an 8.3s GOP the muxed output opened with 7.75s of audio and no picture,
+# and every default probe window downstream expired first - ffprobe reported
+# width=0, players showed a blank frame with sound. Dropping the flag put the
+# same input back to a 0.05s seam. The reservoir already absorbs the latency
+# this was meant to save.
 FFMPEG_CMD = [
     FFMPEG_BIN, "-hide_banner", "-loglevel", "warning",
-    "-fflags", "+nobuffer",
     "-analyzeduration", "1000000", "-probesize", "500000",
     "-i", "pipe:0",
     "-map", "0:v", "-map", "0:a:0",
