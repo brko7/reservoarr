@@ -70,6 +70,17 @@ def test_progress_lines_stay_out_of_the_journal(tmp_path, capsys):
     assert "pes packet size mismatch" in journal
 
 
+def test_last_line_without_a_terminator_still_arrives(tmp_path, capsys):
+    """readline() yielded the trailing partial line at EOF; a crash message on
+    the way out arrives exactly that way, so the split loop must flush it too."""
+    resv = load(tmp_path, RESV_FFMPEG_STATS="1")
+
+    resv.stderr_watcher(FakeFfmpeg([b"Conversion failed!"]))
+
+    assert "Conversion failed!" in capsys.readouterr().err
+    assert "Conversion failed!" in Path(resv.LOG_FILE).read_text()
+
+
 def test_corruption_detector_still_sees_its_line(tmp_path, capsys):
     resv = load(tmp_path, RESV_FFMPEG_STATS="1")
     seen = []

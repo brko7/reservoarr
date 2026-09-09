@@ -391,6 +391,18 @@ def register_corrupt(dts):
 def stderr_watcher(ff):
     """Relay ffmpeg stderr (Dispatcharr's logger reads ours) and detect loops."""
     pat = re.compile(rb"Packet corrupt \(stream = \d+, dts = (\d+)\)")
+
+    def relay(raw):
+        line = raw.decode("utf-8", "replace").rstrip()
+        if line:
+            # The progress line is for Dispatcharr's watchdog, not for the
+            # journal: at two lines a second it would rotate delaybuf.log
+            # away from under the cushion telemetry it exists to keep.
+            log(f"ffmpeg: {line}", file=not line.startswith("frame="))
+        m = pat.search(raw)
+        if m:
+            register_corrupt(int(m.group(1)))
+
     pending = b""
     while True:
         chunk = ff.stderr.read(4096)
@@ -406,15 +418,11 @@ def stderr_watcher(ff):
                 break
             idx = min(breaks)
             raw, pending = pending[:idx], pending[idx + 1:]
-            line = raw.decode("utf-8", "replace").rstrip()
-            if line:
-                # The progress line is for Dispatcharr's watchdog, not for the
-                # journal: at two lines a second it would rotate delaybuf.log
-                # away from under the cushion telemetry it exists to keep.
-                log(f"ffmpeg: {line}", file=not line.startswith("frame="))
-            m = pat.search(raw)
-            if m:
-                register_corrupt(int(m.group(1)))
+            relay(raw)
+    # readline() handed back the last line even without a terminator; a crash
+    # message on the way out arrives exactly that way.
+    if pending:
+        relay(pending)
 
 
 def fetcher():
