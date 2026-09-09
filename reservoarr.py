@@ -68,8 +68,14 @@ STALL_S = float(os.getenv("RESV_STALL_S", "25"))                      # no-inges
 TS_WRAP_S = (1 << 33) / 90000.0                                       # PCR base wraps every ~26.5h
 
 FFMPEG_BIN = os.getenv("RESV_FFMPEG_BIN", "/usr/local/bin/ffmpeg")    # Dispatcharr AIO container default
+# Dispatcharr's buffering watchdog only reads `speed=` off a stderr line that also
+# carries `frame=`, and `-loglevel warning` hides ffmpeg's progress line. Off by
+# default: turning it on hands Dispatcharr the signal it needs to fail a starving
+# feed over to the next stream, at the cost of a progress line every 0.5s.
+FFMPEG_STATS = os.getenv("RESV_FFMPEG_STATS", "0") == "1"
 FFMPEG_CMD = [
     FFMPEG_BIN, "-hide_banner", "-loglevel", "warning",
+    *(["-stats"] if FFMPEG_STATS else []),
     "-fflags", "+nobuffer",
     "-analyzeduration", "1000000", "-probesize", "500000",
     "-i", "pipe:0",
@@ -128,17 +134,18 @@ def _maybe_rotate():
 _maybe_rotate()
 
 
-def log(msg, stderr=True):
+def log(msg, stderr=True, file=True):
     global _log_writes
-    _log_writes += 1
-    if _log_writes % 512 == 0:                                        # ~2h at stats cadence; ~5min under
-        _maybe_rotate()                                               # an ffmpeg-stderr storm
-    line = f"{time.strftime('%Y-%m-%dT%H:%M:%S%z')} [{STREAM_ID}] {msg}"
-    try:
-        with open(LOG_FILE, "a") as f:
-            f.write(line + "\n")
-    except OSError:
-        pass
+    if file:
+        _log_writes += 1
+        if _log_writes % 512 == 0:                                    # ~2h at stats cadence; ~5min under
+            _maybe_rotate()                                           # an ffmpeg-stderr storm
+        line = f"{time.strftime('%Y-%m-%dT%H:%M:%S%z')} [{STREAM_ID}] {msg}"
+        try:
+            with open(LOG_FILE, "a") as f:
+                f.write(line + "\n")
+        except OSError:
+            pass
     if stderr:
         sys.stderr.write(f"[delaybuf] {msg}\n")
         sys.stderr.flush()
@@ -384,13 +391,30 @@ def register_corrupt(dts):
 def stderr_watcher(ff):
     """Relay ffmpeg stderr (Dispatcharr's logger reads ours) and detect loops."""
     pat = re.compile(rb"Packet corrupt \(stream = \d+, dts = (\d+)\)")
-    for raw in iter(ff.stderr.readline, b""):
-        line = raw.decode("utf-8", "replace").rstrip()
-        if line:
-            log(f"ffmpeg: {line}")
-        m = pat.search(raw)
-        if m:
-            register_corrupt(int(m.group(1)))
+    pending = b""
+    while True:
+        chunk = ff.stderr.read(4096)
+        if not chunk:
+            break
+        pending += chunk
+        # ffmpeg terminates its progress line with \r, so readline() used to hold
+        # every one of them until an unrelated \n arrived. Splitting on both is a
+        # no-op while RESV_FFMPEG_STATS is off: nothing else ends in \r.
+        while True:
+            breaks = [i for i in (pending.find(b"\n"), pending.find(b"\r")) if i != -1]
+            if not breaks:
+                break
+            idx = min(breaks)
+            raw, pending = pending[:idx], pending[idx + 1:]
+            line = raw.decode("utf-8", "replace").rstrip()
+            if line:
+                # The progress line is for Dispatcharr's watchdog, not for the
+                # journal: at two lines a second it would rotate delaybuf.log
+                # away from under the cushion telemetry it exists to keep.
+                log(f"ffmpeg: {line}", file=not line.startswith("frame="))
+            m = pat.search(raw)
+            if m:
+                register_corrupt(int(m.group(1)))
 
 
 def fetcher():

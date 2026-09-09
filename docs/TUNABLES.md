@@ -17,6 +17,7 @@ Defaults are unchanged since v6.1 and calibrated against real incidents (see the
 | `RESV_TS_SUSTAIN_WINS` | `2` | #5: consecutive flagged windows before action. |
 | `RESV_LOG_DIR` | `/data/scripts/logs` | Where `delaybuf.log` lives. Set to a writable dir if not running under the AIO container. |
 | `RESV_FFMPEG_BIN` | `/usr/local/bin/ffmpeg` | ffmpeg path. Override on dev hosts (`/opt/homebrew/bin/ffmpeg`, `/usr/bin/ffmpeg`). |
+| `RESV_FFMPEG_STATS` | `0` | `1` adds `-stats`, so ffmpeg's `frame=… speed=…` line reaches Dispatcharr and its buffering failover can move a starving feed to the next stream. `-loglevel warning` is unchanged (invariant #9), and the progress line goes to stderr only, never to `delaybuf.log`. |
 
 ## When to bump what
 
