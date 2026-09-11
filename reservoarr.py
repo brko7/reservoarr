@@ -412,12 +412,10 @@ def stderr_watcher(ff):
 
     pending = b""
     while True:
-        # read1(), not read(): one os.read per call, returning whatever is already
-        # in the pipe. read() on a buffered stream would block until it had 4096
-        # bytes or EOF - fine today (ff is spawned bufsize=0, so stderr is raw and
-        # read() returns short), but read1 keeps the relay real-time regardless,
-        # which Dispatcharr's stats watchdog depends on.
-        chunk = ff.stderr.read1(4096)
+        # os.read on the fd returns whatever is already in the pipe, raw or
+        # buffered. Not read1(): ff is spawned bufsize=0, so stderr is a FileIO,
+        # which has no read1. Dispatcharr's stats watchdog needs this real-time.
+        chunk = os.read(ff.stderr.fileno(), 4096)
         if not chunk:
             break
         pending += chunk

@@ -7,6 +7,7 @@ and ffmpeg terminates that line with \\r — which readline() never yielded.
 from __future__ import annotations
 
 import importlib.util
+import io
 import os
 import sys
 from pathlib import Path
@@ -31,17 +32,12 @@ def load(tmp_log_dir, **env):
     return mod
 
 
-class FakeStderr:
-    def __init__(self, chunks):
-        self._chunks = list(chunks)
-
-    def read1(self, _size):
-        return self._chunks.pop(0) if self._chunks else b""
-
-
 class FakeFfmpeg:
     def __init__(self, chunks):
-        self.stderr = FakeStderr(chunks)
+        read_fd, write_fd = os.pipe()
+        os.write(write_fd, b"".join(chunks))
+        os.close(write_fd)
+        self.stderr = io.FileIO(read_fd, "r")
 
 
 def test_stats_flag_is_opt_in(tmp_path):
