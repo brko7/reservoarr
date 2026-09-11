@@ -73,10 +73,17 @@ FFMPEG_BIN = os.getenv("RESV_FFMPEG_BIN", "/usr/local/bin/ffmpeg")    # Dispatch
 # default: turning it on hands Dispatcharr the signal it needs to fail a starving
 # feed over to the next stream, at the cost of a progress line every 0.5s.
 FFMPEG_STATS = os.getenv("RESV_FFMPEG_STATS", "0") == "1"
+# No `-fflags +nobuffer`: it costs the whole first GOP of video. The demuxer
+# hands packets on before it has the video's parameter sets, so ffmpeg emits
+# audio from the first sample and video only from the next IDR. On a channel
+# with an 8.3s GOP the muxed output opened with 7.75s of audio and no picture,
+# and every default probe window downstream expired first - ffprobe reported
+# width=0, players showed a blank frame with sound. Dropping the flag put the
+# same input back to a 0.05s seam. The reservoir already absorbs the latency
+# this was meant to save.
 FFMPEG_CMD = [
     FFMPEG_BIN, "-hide_banner", "-loglevel", "warning",
     *(["-stats"] if FFMPEG_STATS else []),
-    "-fflags", "+nobuffer",
     "-analyzeduration", "1000000", "-probesize", "500000",
     "-i", "pipe:0",
     "-map", "0:v", "-map", "0:a:0",
@@ -405,7 +412,12 @@ def stderr_watcher(ff):
 
     pending = b""
     while True:
-        chunk = ff.stderr.read(4096)
+        # read1(), not read(): one os.read per call, returning whatever is already
+        # in the pipe. read() on a buffered stream would block until it had 4096
+        # bytes or EOF - fine today (ff is spawned bufsize=0, so stderr is raw and
+        # read() returns short), but read1 keeps the relay real-time regardless,
+        # which Dispatcharr's stats watchdog depends on.
+        chunk = ff.stderr.read1(4096)
         if not chunk:
             break
         pending += chunk

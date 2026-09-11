@@ -35,7 +35,7 @@ class FakeStderr:
     def __init__(self, chunks):
         self._chunks = list(chunks)
 
-    def read(self, _size):
+    def read1(self, _size):
         return self._chunks.pop(0) if self._chunks else b""
 
 
