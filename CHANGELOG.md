@@ -2,6 +2,18 @@
 
 All notable changes to `reservoarr.py`. Each version's invariants are earned by a real production failure — read this before changing the script.
 
+## [6.3.2] — 2026-09-11
+
+Two contributor-reported fixes ([@PilaScat](https://github.com/PilaScat)), both diagnosed with captured-stream measurements. **No pacing/controller behaviour changes.**
+
+- **Dropped `-fflags +nobuffer` — it cost the whole first GOP of video** ([#32](https://github.com/brko7/reservoarr/issues/32) / [PR #33](https://github.com/brko7/reservoarr/pull/33)). With `+nobuffer`, ffmpeg's demuxer handed packets on before it had the video's parameter sets, so the muxed output opened with audio from the first sample and video only from the next IDR. On a channel with an 8.3s GOP that was a ~7.8s seam of sound with no picture — longer than every default probe window downstream, so `ffprobe` reported `width=0 height=0` and players showed a blank frame. Measured on captured `/proxy/ts/stream/` output, the same input replayed through the exact `FFMPEG_CMD` one flag apart: first video went from 8.38s to 0.68s and the stream resolved `1280x720 High` on the first probe; on the live channel the seam went from 7.87s to 0.06s. The reservoir already absorbs the startup latency the flag was meant to trim, and the low-latency probe window (`-analyzeduration 1M -probesize 500k`) that keeps the tune inside Plex's tuner timeout is unchanged. Codified as **invariant #12**; regression test in `tests/unit/test_ffmpeg_buffering.py`.
+
+- **New `RESV_FFMPEG_STATS` tunable (default off) so Dispatcharr's buffering failover can see a starving feed** ([#30](https://github.com/brko7/reservoarr/issues/30) / [PR #31](https://github.com/brko7/reservoarr/pull/31)). Dispatcharr reads `speed=` only off a stderr line that also carries `frame=`, and `-loglevel warning` (invariant #9) hides ffmpeg's progress line — so a source delivering below content rate was never failed over to the next stream, the exact fault reservoarr is deployed against. `RESV_FFMPEG_STATS=1` appends `-stats` to `FFMPEG_CMD` (loglevel untouched, so invariant #9 holds); `stderr_watcher` now splits on `\r` as well as `\n` (ffmpeg terminates the progress line with `\r`, which `readline()` never yielded) and keeps the progress line out of `delaybuf.log` so it can't rotate the cushion telemetry away. Default-off means existing installs are byte-identical apart from the `\r` split, which cannot fire on warning-level output. Measured recovery on a synthetic starving source: 22.1s from tune to failover, versus no failover at all before. Documented in `docs/TUNABLES.md`.
+
+- **`stderr_watcher` reads with `read1(4096)`**, not `read(4096)`, so the relay stays real-time regardless of stderr buffering — a `BufferedReader.read(4096)` blocks until 4096 bytes or EOF, correct today only because ffmpeg is spawned `bufsize=0`.
+
+- All 65 unit + 7 e2e tests pass.
+
 ## [6.3.1] — 2026-07-03
 
 Hardening release from a full-repo review. Three runtime fixes in `reservoarr.py` plus one plugin install-gate fix. **No pacing/controller behaviour changes**; all invariants intact.
