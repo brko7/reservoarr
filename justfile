@@ -45,6 +45,13 @@ syntax:
 version-check:
     @{{py}} tools/check_versions.py
 
+# Bump the release version across pyproject.toml + plugin/plugin.json +
+# plugin/plugin.py and scaffold a CHANGELOG section, then verify sync.
+# Usage: just bump 6.3.3   — then fill in the CHANGELOG prose and open the PR.
+bump version:
+    @{{py}} tools/bump_version.py {{version}}
+    @{{py}} tools/check_versions.py
+
 lint: venv syntax version-check
     @{{ruff}} check .
 
