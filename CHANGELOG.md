@@ -2,6 +2,23 @@
 
 All notable changes to `reservoarr.py`. Each version's invariants are earned by a real production failure — read this before changing the script.
 
+## [6.3.3] — 2026-09-13
+
+Critical regression fix for v6.3.2 ([@PilaScat](https://github.com/PilaScat), [#36](https://github.com/brko7/reservoarr/issues/36) / [PR #37](https://github.com/brko7/reservoarr/pull/37)). **Do not deploy v6.3.2** — its `stderr_watcher` dies on the first read of every tune. **No pacing/controller behaviour changes.**
+
+- **`stderr_watcher` called `ff.stderr.read1(4096)` on a stream that has no `read1`.** ffmpeg is spawned `bufsize=0`, so `ff.stderr` is a raw `io.FileIO` — and `read1` is defined only on `io.BufferedIOBase`, not on raw streams. The `read1` change shipped in v6.3.2's [PR #31](https://github.com/brko7/reservoarr/pull/31) therefore raised `AttributeError: '_io.FileIO' object has no attribute 'read1'` on the *first* read of every tune, killing the watcher thread. Because the watcher is a daemon thread, the tune kept running and nothing failed loudly, but three things went dark:
+  - the corrupt-loop detector (invariant #9) never saw a `Packet corrupt (… dts = N)` line, so a wedged edge could no longer be force-reconnected + flushed;
+  - no `frame=…speed=` progress line reached Dispatcharr, so the `RESV_FFMPEG_STATS` starvation-failover added in the same v6.3.2 release did nothing;
+  - ffmpeg's stderr was no longer drained, so it would block once the pipe filled (~64 KB of warnings).
+
+  Confirmed on Dispatcharr 0.30.0: over a 3-minute tune on stock v6.3.2, `stream_stats` never updated and no `ffmpeg:` line reached `delaybuf.log`; on the fixed build the stats updated ~11s after tune. The fix reads `os.read(ff.stderr.fileno(), 4096)`, which returns whatever is already in the pipe on both raw and buffered streams — the real-time semantics `read1` was reaching for. The v6.3.2 note that `read1` "stays real-time regardless of stderr buffering" was wrong: `read1` isn't present on the raw `FileIO` that v6.3.2 actually hands the watcher.
+
+- **The v6.3.2 blank-picture fix (drop `-fflags +nobuffer`, invariant #12) was unaffected.** It is an `FFMPEG_CMD` change with no dependency on the watcher, so it worked in v6.3.2 and still works — only `RESV_FFMPEG_STATS` and the corrupt-loop detector were dead.
+
+- **Why the suite missed it:** the `test_ffmpeg_stats.py` fake implemented `read1`, so the tests exercised a method production never had; the e2e suite spawns real ffmpeg, but the daemon-thread death is silent, so it stayed green on v6.3.2. The fake now hands `stderr_watcher` a real OS pipe opened the way `Popen(bufsize=0)` opens stderr (`io.FileIO` over the read fd) — without the fix, four of its tests fail with the production `AttributeError`.
+
+- All 65 unit + 7 e2e tests pass.
+
 ## [6.3.2] — 2026-09-11
 
 Two contributor-reported fixes ([@PilaScat](https://github.com/PilaScat)), both diagnosed with captured-stream measurements. **No pacing/controller behaviour changes.**
