@@ -65,7 +65,7 @@ CC_ERR_PER_WIN = int(os.getenv("RESV_CC_ERR_PER_WIN", "3"))           # CC error
 SYNC_ERR_PER_WIN = int(os.getenv("RESV_SYNC_ERR_PER_WIN", "2"))       # sync losses per stats window = flagged
 TS_SUSTAIN_WINS = int(os.getenv("RESV_TS_SUSTAIN_WINS", "2"))         # consecutive flagged windows before acting
 STALL_S = float(os.getenv("RESV_STALL_S", "25"))                      # no-ingest watchdog (#4); >CDN burst-gap, <urlopen 30s; 0=off
-GIVEUP_TRIES = int(os.getenv("RESV_GIVEUP_TRIES", "0"))
+GIVEUP_TRIES = int(os.getenv("RESV_GIVEUP_TRIES", "0"))               # exit after N no-data upstream tries so Dispatcharr fails over; 0=retry forever
 TS_WRAP_S = (1 << 33) / 90000.0                                       # PCR base wraps every ~26.5h
 
 FFMPEG_BIN = os.getenv("RESV_FFMPEG_BIN", "/usr/local/bin/ffmpeg")    # Dispatcharr AIO container default

@@ -2,6 +2,14 @@
 
 All notable changes to `reservoarr.py`. Each version's invariants are earned by a real production failure — read this before changing the script.
 
+## [6.3.4] — 2026-09-13
+
+New default-off tunable ([@PilaScat](https://github.com/PilaScat), [PR #39](https://github.com/brko7/reservoarr/pull/39)). **No change for existing installs** — `RESV_GIVEUP_TRIES=0` is the default and preserves today's retry-forever behaviour.
+
+- **New `RESV_GIVEUP_TRIES=N` tunable so a stream that never delivers a byte fails over instead of stranding the channel.** The fetcher retries every upstream error forever, which is correct once data has flowed (the stall watchdog and reconnects keep the cushion alive) but wrong before the first byte: a stream whose edge answers `403` never ends the process, so Dispatcharr never counts a failed attempt, never walks the chain, and never reaches the fallback — the viewer just gets an error after ~50s. On Dispatcharr 0.30.0 the health monitor (`_monitor_health`) only asks for a stream switch after `channel_init_grace_period` (60s) *plus* three unhealthy checks, but the waiting client aborts at that same grace period (Jellyfin at ~50s), so the channel is stopped before the switch is ever requested. The only fast failover path is the process ending. With `RESV_GIVEUP_TRIES=N`, after N upstream attempts that brought no byte at all (errors and connects that close empty alike) the process exits so Dispatcharr retries and fails over; once any byte has arrived it never fires. Measured on the production profile (2026-09-13, provider edges intermittently `403`-ing after a VPN exit change): with `RESV_GIVEUP_TRIES=3`, the stream switch landed 13s after the tune and the client had picture at +16s, versus an error at +50s and no switch at all before. Documented in `docs/TUNABLES.md`; four new tests in `tests/unit/test_giveup.py` run the real `fetcher()` against scripted answers.
+
+- All 69 unit tests pass.
+
 ## [6.3.3] — 2026-09-13
 
 Critical regression fix for v6.3.2 ([@PilaScat](https://github.com/PilaScat), [#36](https://github.com/brko7/reservoarr/issues/36) / [PR #37](https://github.com/brko7/reservoarr/pull/37)). **Do not deploy v6.3.2** — its `stderr_watcher` dies on the first read of every tune. **No pacing/controller behaviour changes.**
