@@ -11,6 +11,7 @@ Defaults are unchanged since v6.1 and calibrated against real incidents (see the
 | `RESV_GRACE_S` | `45.0` | First N seconds use floor `1.0` (realtime release); after, floor drops to `0.97`. Prevents starving the player before the bank settles. |
 | `RESV_MAX_BYTES` | `268435456` (256 MB) | Reservoir hard cap. Worst-case RAM per concurrent stream. |
 | `RESV_STALL_S` | `25.0` | No-ingest watchdog (#4). If no bytes arrive for this long while running, force a reconnect WITHOUT flushing the buffer. `0` disables. |
+| `RESV_GIVEUP_TRIES` | `0` | Upstream attempts that may end without a single byte before the process exits, so Dispatcharr counts a failed attempt and, after its own retries, moves the channel to the next stream. Errors and connects that close empty both count; once any byte has arrived it never fires. `0` retries forever, as before. Without it, a stream the edge answers `403` keeps the channel "connecting" until the client gives up, and the chain is never walked. |
 | `RESV_TS_RECONNECT` | `0` | #5 ingest-corruption detector action mode. `0` = log-only ("would-fire"). `1` = arm the forced reconnect+flush. **See arming guidance in [CHANGELOG](../CHANGELOG.md).** |
 | `RESV_CC_ERR_PER_WIN` | `3` | #5 trigger: CC errors per 15s window to flag. |
 | `RESV_SYNC_ERR_PER_WIN` | `2` | #5 trigger: sync losses per 15s window to flag. |

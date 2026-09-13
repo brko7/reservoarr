@@ -65,6 +65,7 @@ CC_ERR_PER_WIN = int(os.getenv("RESV_CC_ERR_PER_WIN", "3"))           # CC error
 SYNC_ERR_PER_WIN = int(os.getenv("RESV_SYNC_ERR_PER_WIN", "2"))       # sync losses per stats window = flagged
 TS_SUSTAIN_WINS = int(os.getenv("RESV_TS_SUSTAIN_WINS", "2"))         # consecutive flagged windows before acting
 STALL_S = float(os.getenv("RESV_STALL_S", "25"))                      # no-ingest watchdog (#4); >CDN burst-gap, <urlopen 30s; 0=off
+GIVEUP_TRIES = int(os.getenv("RESV_GIVEUP_TRIES", "0"))
 TS_WRAP_S = (1 << 33) / 90000.0                                       # PCR base wraps every ~26.5h
 
 FFMPEG_BIN = os.getenv("RESV_FFMPEG_BIN", "/usr/local/bin/ffmpeg")    # Dispatcharr AIO container default
@@ -439,6 +440,7 @@ def fetcher():
     global buf_bytes, in_total, reconnects, upstream_eof, cur_response, flush_pending
     backoff = 1
     first = True
+    tries_without_data = 0
     while not stop.is_set():
         try:
             if force_reconnect.is_set():
@@ -488,6 +490,12 @@ def fetcher():
             log(f"upstream error {type(e).__name__}: {e}; retry in {backoff}s")
         if stop.is_set():
             break
+        if in_total == 0:
+            tries_without_data += 1
+            if GIVEUP_TRIES and tries_without_data >= GIVEUP_TRIES:
+                log(f"giving up: no data after {tries_without_data} upstream attempts "
+                    f"(RESV_GIVEUP_TRIES={GIVEUP_TRIES}); exiting so Dispatcharr can try the next stream")
+                break
         if force_reconnect.is_set():
             continue                                                 # intentional reconnect: flush + reconnect now, no backoff
         time.sleep(backoff)
