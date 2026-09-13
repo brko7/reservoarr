@@ -66,6 +66,9 @@ SYNC_ERR_PER_WIN = int(os.getenv("RESV_SYNC_ERR_PER_WIN", "2"))       # sync los
 TS_SUSTAIN_WINS = int(os.getenv("RESV_TS_SUSTAIN_WINS", "2"))         # consecutive flagged windows before acting
 STALL_S = float(os.getenv("RESV_STALL_S", "25"))                      # no-ingest watchdog (#4); >CDN burst-gap, <urlopen 30s; 0=off
 GIVEUP_TRIES = int(os.getenv("RESV_GIVEUP_TRIES", "0"))               # exit after N no-data upstream tries so Dispatcharr fails over; 0=retry forever
+REPLAY_SKIP = os.getenv("RESV_REPLAY_SKIP", "0") == "1"
+REPLAY_MAX_S = float(os.getenv("RESV_REPLAY_MAX_S", "60"))
+REPLAY_HOLD_BYTES = 1024 * 1024
 TS_WRAP_S = (1 << 33) / 90000.0                                       # PCR base wraps every ~26.5h
 
 FFMPEG_BIN = os.getenv("RESV_FFMPEG_BIN", "/usr/local/bin/ffmpeg")    # Dispatcharr AIO container default
@@ -159,6 +162,35 @@ def log(msg, stderr=True, file=True):
         sys.stderr.flush()
 
 
+def ts_sync(buf_, start):
+    n = len(buf_)
+    i = buf_.find(0x47, start)
+    while 0 <= i:
+        if i + 376 >= n:
+            return -1                                                 # not enough data to confirm; carry
+        if buf_[i + 188] == 0x47 and buf_[i + 376] == 0x47:
+            return i
+        i = buf_.find(0x47, i + 1)
+    return -1
+
+
+def pcr_seconds(buf_, i):
+    base = (buf_[i + 6] << 25 | buf_[i + 7] << 17 | buf_[i + 8] << 9
+            | buf_[i + 9] << 1 | buf_[i + 10] >> 7)
+    ext = (buf_[i + 10] & 0x01) << 8 | buf_[i + 11]
+    return (base * 300 + ext) / 27_000_000.0
+
+
+def packet_pcr(buf_, i):
+    if not buf_[i + 3] & 0x20:
+        return None
+    aflen = buf_[i + 4]
+    if aflen < 7 or not buf_[i + 5] & 0x10:
+        return None
+    pid = (buf_[i + 1] & 0x1F) << 8 | buf_[i + 2]
+    return pid, pcr_seconds(buf_, i), bool(buf_[i + 5] & 0x80)
+
+
 class TsParser:
     """Observes the ingest byte stream at TS-packet level. Two jobs:
 
@@ -214,16 +246,10 @@ class TsParser:
 
     def _sync(self, buf_, start):
         """Find a 0x47 confirmed by two more at 188-byte stride."""
-        n = len(buf_)
-        i = buf_.find(0x47, start)
-        while 0 <= i:
-            if i + 376 >= n:
-                return -1                                             # not enough data to confirm; carry
-            if buf_[i + 188] == 0x47 and buf_[i + 376] == 0x47:
-                self.synced = True
-                return i
-            i = buf_.find(0x47, i + 1)
-        return -1
+        i = ts_sync(buf_, start)
+        if i >= 0:
+            self.synced = True
+        return i
 
     def _packet(self, buf_, i):
         b3 = buf_[i + 3]
@@ -258,10 +284,7 @@ class TsParser:
             self.pcr_pid = pid                                        # lock onto the first PCR carrier
         elif pid != self.pcr_pid:
             return                                                    # one clock only
-        base = (buf_[i + 6] << 25 | buf_[i + 7] << 17 | buf_[i + 8] << 9
-                | buf_[i + 9] << 1 | buf_[i + 10] >> 7)
-        ext = (buf_[i + 10] & 0x01) << 8 | buf_[i + 11]
-        pcr = (base * 300 + ext) / 27_000_000.0
+        pcr = pcr_seconds(buf_, i)
         if self.last_pcr is None:
             self.last_pcr = pcr
             return
@@ -316,6 +339,76 @@ class TsParser:
 
 
 parser = TsParser()
+
+replay_seam = None
+replay_held = bytearray()
+replay_first = None
+replay_prev = None
+replay_dropped = 0
+
+
+def arm_replay_skip(allowed=True):
+    global replay_seam, replay_first, replay_prev, replay_dropped
+    replay_held.clear()
+    replay_first = replay_prev = None
+    replay_dropped = 0
+    ready = allowed and REPLAY_SKIP and parser.pcr_pid is not None and parser.last_pcr is not None
+    replay_seam = (parser.pcr_pid, parser.last_pcr) if ready else None
+
+
+def _release_replay(reason):
+    global replay_seam
+    out = bytes(replay_held)
+    replay_held.clear()
+    replay_seam = None
+    if reason:
+        log(f"replay after reconnect: {reason}; passing through", stderr=False)
+    return out
+
+
+def skip_replay(data):
+    global replay_seam, replay_first, replay_prev, replay_dropped
+    if replay_seam is None:
+        return data
+    replay_held.extend(data)
+    held = replay_held
+    pid_seam, seam = replay_seam
+    i = ts_sync(held, 0)
+    if i < 0:
+        return _release_replay("no TS sync within the hold limit") if len(held) > REPLAY_HOLD_BYTES else b""
+    while i + 188 <= len(held):
+        if held[i] != 0x47:
+            return _release_replay("lost TS sync")
+        found = packet_pcr(held, i)
+        if found and found[0] == pid_seam:
+            _, pcr, disc = found
+            if disc:
+                return _release_replay("discontinuity flag")
+            ahead = (pcr - seam) % TS_WRAP_S
+            if 0 < ahead < TS_WRAP_S / 2:
+                if replay_first is None:
+                    return _release_replay("")
+                skipped = (seam - replay_first) % TS_WRAP_S
+                out = bytes(held[i:])
+                log(f"replay after reconnect: skipped {skipped:.1f}s "
+                    f"({(i + replay_dropped) / 1e6:.1f}MB) already delivered", stderr=False)
+                held.clear()
+                replay_seam = None
+                return out
+            if replay_first is None:
+                behind = (seam - pcr) % TS_WRAP_S
+                if behind > REPLAY_MAX_S:
+                    return _release_replay(f"{behind:.0f}s back is beyond RESV_REPLAY_MAX_S")
+                replay_first = pcr
+            elif not 0 < (pcr - replay_prev) % TS_WRAP_S < 10.0:
+                return _release_replay("PCR not advancing through the replay")
+            replay_prev = pcr
+        i += 188
+    if replay_first is None:
+        return _release_replay("no PCR within the hold limit") if len(held) > REPLAY_HOLD_BYTES else b""
+    replay_dropped += i
+    del held[:i]
+    return b""
 
 
 def in_rate():
@@ -442,10 +535,12 @@ def fetcher():
     first = True
     tries_without_data = 0
     while not stop.is_set():
+        flushed = False
         try:
             if force_reconnect.is_set():
                 with cond:
                     do_flush = flush_pending
+                    flushed = do_flush
                     if do_flush:
                         buf.clear()
                         buf_bytes = 0
@@ -456,6 +551,7 @@ def fetcher():
             req = urllib.request.Request(URL, headers={"User-Agent": UA})
             r = urllib.request.urlopen(req, timeout=30)
             cur_response = r
+            arm_replay_skip(allowed=not flushed)
             parser.on_reconnect()
             edge = r.geturl().split("/")[2]
             log(f"upstream connected edge={edge}")
@@ -477,6 +573,9 @@ def fetcher():
                 backoff = 1                                           # reset only once data flows: an empty
                 #                                                       connect must keep backing off, not
                 #                                                       hammer the provider at 1/s forever
+                d = skip_replay(d)
+                if not d:
+                    continue
                 with cond:
                     while buf_bytes >= MAX_BYTES and not stop.is_set():
                         cond.wait(1)
