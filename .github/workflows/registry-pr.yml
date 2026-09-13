@@ -1,0 +1,171 @@
+name: registry-pr
+
+# Phase 2 of the release automation: after a release publishes, open (or
+# refresh) the Dispatcharr/Plugins registry PR that bumps
+# plugins/reservoarr/plugin.json to the new version. The maintainer merge
+# upstream stays manual — we can't (and shouldn't) merge a repo we don't own.
+#
+# Why this is a SEPARATE workflow, not a job in release.yml:
+#   The registry PR needs a PAT (see the auth note below). Keeping it out of the
+#   artifact-building job means the credential is never in scope while we
+#   build/upload the release zip — smaller blast radius. It is also
+#   independently re-runnable from the Actions tab.
+#
+# Auth note — why a classic PAT scoped to `public_repo` only, and why pure API:
+#   Opening a PR against Dispatcharr/Plugins is cross-org: we need a branch on
+#   the brko7/Plugins fork AND a PR on a repo we do not administer.
+#   - GITHUB_TOKEN is scoped to brko7/reservoarr only → can do neither.
+#   - Fine-grained PATs / GitHub Apps can only grant pull_requests:write on
+#     repos the owner administers → they cannot create the PR on
+#     Dispatcharr/Plugins.
+#   Only a classic PAT acting as the brko7 *user* can open a cross-fork PR on a
+#   repo it doesn't own. In the classic-PAT UI the `workflow` scope is nested
+#   under `repo` and force-selects full `repo` (all private repos) — which we
+#   don't want. So this workflow does everything over the GitHub API and NEVER
+#   pushes git refs that carry workflow files: it creates the fork branch ref
+#   directly at the upstream base commit (forks share object storage) and edits
+#   only plugin.json via the Contents API. plugin.json is not a workflow file,
+#   so the token needs only `public_repo` — no `workflow` scope, no private-repo
+#   access. Store it as the REGISTRY_PR_TOKEN repo secret; if it's missing the
+#   job fails loud with instructions.
+
+on:
+  workflow_run:
+    workflows: [release]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to open the registry PR for (e.g. v6.3.4). Must already be released."
+        required: true
+
+permissions:
+  contents: read   # this workflow authenticates to GitHub via the PAT, not GITHUB_TOKEN
+
+concurrency:
+  # One registry PR per tag; never cancel a ref/PR-create mid-flight.
+  group: registry-pr-${{ github.event.inputs.tag || github.event.workflow_run.head_branch }}
+  cancel-in-progress: false
+
+env:
+  UPSTREAM: Dispatcharr/Plugins
+  FORK: brko7/Plugins
+  MANIFEST: plugins/reservoarr/plugin.json
+
+jobs:
+  registry-pr:
+    # For the workflow_run path, only act when the release build actually
+    # succeeded. workflow_dispatch has no conclusion, so let it through.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Open or refresh the Dispatcharr/Plugins registry PR
+        env:
+          # The tag comes from the manual input, or from the release run that
+          # triggered us (release.yml is dispatched with --ref vX.Y.Z, so the
+          # triggering run's head_branch is the tag).
+          RAW_TAG: ${{ github.event.inputs.tag || github.event.workflow_run.head_branch }}
+          GH_TOKEN: ${{ secrets.REGISTRY_PR_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::REGISTRY_PR_TOKEN secret is not set. Create a classic PAT on the brko7 account scoped to 'public_repo' (only) and add it as the REGISTRY_PR_TOKEN repo secret. See the header of this workflow for why a classic PAT is required."
+            exit 1
+          fi
+
+          # Validate the tag shape before doing anything with it (refnames can
+          # carry surprising characters; the PAT makes this a security boundary).
+          if [[ ! "$RAW_TAG" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            echo "::notice::trigger ref '$RAW_TAG' is not a vX.Y.Z release tag; nothing to do"
+            exit 0
+          fi
+          TAG="$RAW_TAG"
+          VERSION="${TAG#v}"
+          BRANCH="bump-reservoarr-$TAG"
+          ASSET_URL="https://github.com/brko7/reservoarr/releases/download/$TAG/reservoarr-$VERSION.zip"
+          echo "tag=$TAG version=$VERSION branch=$BRANCH"
+
+          # The registry validation bot downloads the resolved source_url, so
+          # the release asset must be reachable before we open the PR. Retry a
+          # little in case the asset upload lags the workflow_run signal.
+          for attempt in 1 2 3 4 5; do
+            if curl -sfI "$ASSET_URL" >/dev/null; then break; fi
+            echo "release asset not reachable yet (attempt $attempt); retrying in 10s"
+            sleep 10
+            if [ "$attempt" = 5 ]; then
+              echo "::error::release asset $ASSET_URL is not reachable; refusing to open a registry PR the bot cannot validate"
+              exit 1
+            fi
+          done
+
+          # Upstream main's current head — our branch will be based on it so the
+          # PR diff is exactly the one-line version bump, regardless of whether
+          # the fork's own main is stale.
+          BASE_SHA=$(gh api "repos/$UPSTREAM/git/ref/heads/main" --jq .object.sha)
+          echo "upstream main base: $BASE_SHA"
+
+          # Read the manifest at that base (Contents API). .sha is the blob sha
+          # we must pass back on the update; .content is base64 file bytes.
+          gh api "repos/$UPSTREAM/contents/$MANIFEST?ref=$BASE_SHA" > manifest_meta.json
+          BLOB_SHA=$(jq -r .sha manifest_meta.json)
+          jq -r .content manifest_meta.json | base64 -d > manifest.orig
+          PUBLISHED=$(jq -r .version manifest.orig)
+          echo "currently published registry version: $PUBLISHED"
+
+          # Idempotency: skip if the registry already has this version or newer
+          # (PR already merged, or a re-run). sort -V picks the higher semver.
+          HIGHEST=$(printf '%s\n%s\n' "$PUBLISHED" "$VERSION" | sort -V | tail -1)
+          if [ "$PUBLISHED" = "$VERSION" ] || [ "$HIGHEST" != "$VERSION" ]; then
+            echo "::notice::registry is already at $PUBLISHED (>= $VERSION); no PR needed"
+            exit 0
+          fi
+
+          # Skip if an open PR for this exact head branch already exists.
+          if [ -n "$(gh pr list --repo "$UPSTREAM" --head "brko7:$BRANCH" --state open --json number --jq '.[].number')" ]; then
+            echo "::notice::an open registry PR for $BRANCH already exists; leaving it"
+            exit 0
+          fi
+
+          # Minimal diff: rewrite only the version field, preserving formatting
+          # and the trailing newline (operating on the file, not a shell var).
+          python3 - manifest.orig manifest.new "$VERSION" <<'PY'
+          import re, sys
+          src_path, out_path, version = sys.argv[1], sys.argv[2], sys.argv[3]
+          src = open(src_path).read()
+          new, n = re.subn(r'("version"\s*:\s*)"[^"]*"', r'\1"%s"' % version, src, count=1)
+          if n != 1:
+              sys.exit("expected exactly one version field, replaced %d" % n)
+          open(out_path, "w").write(new)
+          PY
+          NEW_B64=$(base64 -w0 manifest.new)
+
+          # Create (or reset) the fork branch pointing at the upstream base
+          # commit. This is a ref op over the API — no git push — so it never
+          # carries upstream's workflow files and needs no `workflow` scope.
+          # Forks share object storage, so the upstream commit is referenceable.
+          if gh api "repos/$FORK/git/ref/heads/$BRANCH" >/dev/null 2>&1; then
+            gh api -X PATCH "repos/$FORK/git/refs/heads/$BRANCH" -f sha="$BASE_SHA" -F force=true >/dev/null
+          else
+            gh api -X POST "repos/$FORK/git/refs" -f ref="refs/heads/$BRANCH" -f sha="$BASE_SHA" >/dev/null
+          fi
+
+          # Commit the one-file change on the fork branch via the Contents API.
+          # The blob sha on the branch equals the upstream blob (branch == base).
+          gh api -X PUT "repos/$FORK/contents/$MANIFEST" \
+            -f message="[reservoarr] Bump to $TAG" \
+            -f content="$NEW_B64" \
+            -f sha="$BLOB_SHA" \
+            -f branch="$BRANCH" >/dev/null
+
+          # zip sha256 for the PR body (also re-proves the asset is reachable).
+          ZIP_SHA=$(curl -sL "$ASSET_URL" | sha256sum | awk '{print $1}')
+
+          gh pr create \
+            --repo "$UPSTREAM" \
+            --head "brko7:$BRANCH" \
+            --base main \
+            --title "[reservoarr] Bump to $TAG" \
+            --body "$(printf 'Bumps `reservoarr` to **%s**.\n\nSee the [release notes](https://github.com/brko7/reservoarr/releases/tag/%s) and [CHANGELOG](https://github.com/brko7/reservoarr/blob/%s/CHANGELOG.md) for what changed.\n\nZip sha256: `%s`\n\n_Opened automatically by brko7/reservoarr `registry-pr.yml` on release._' "$TAG" "$TAG" "$TAG" "$ZIP_SHA")"
