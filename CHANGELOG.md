@@ -4,7 +4,7 @@ All notable changes to `reservoarr.py`. Each version's invariants are earned by 
 
 ## [6.3.5] — 2026-09-14
 
-New default-off tunable ([@PilaScat](https://github.com/PilaScat), [#40](https://github.com/brko7/reservoarr/issues/40)). **No change for existing installs** — `RESV_REPLAY_SKIP=0` is the default and leaves the output byte-for-byte as in 6.3.4.
+New default-off tunable ([@PilaScat](https://github.com/PilaScat), [#40](https://github.com/brko7/reservoarr/issues/40) / [PR #42](https://github.com/brko7/reservoarr/pull/42)). **No change for existing installs** — `RESV_REPLAY_SKIP=0` is the default and leaves the output byte-for-byte as in 6.3.4.
 
 - **New `RESV_REPLAY_SKIP=1` tunable that drops what an edge resends after a plain reconnect.** On some CDNs a connection ends with a clean EOF every few minutes and the next one starts 9–25s behind the point the old one reached. The fetcher appended that replay, so viewers saw the same seconds twice; and because `on_reconnect()` re-anchors the PCR chain, the replay was banked as new cushion on every reconnect instead of self-draining. With the tunable on, the fetcher remembers the last PCR taken before the seam and drops packets of the new connection until the PCR passes it. Every seam it cannot place passes through as before: a replay further back than `RESV_REPLAY_MAX_S` (60s), a discontinuity flag, a PCR that stops advancing, no PCR or no TS sync within 1 MB, and any flushing reconnect. This reopens the "EOF-reconnect overlap-replay dedup" row of `docs/INVARIANTS.md`, now as opt-in. Measured on `cdn_sim --front 25 --eof-at 40`:
 
