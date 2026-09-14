@@ -85,12 +85,58 @@ def test_a_discontinuity_flag_passes_everything(gate):
     assert run(data) == data
 
 
-def test_a_pcr_that_stops_advancing_releases_what_is_held(gate):
+def test_a_pcr_that_goes_back_releases_everything_held(gate):
     arm, run = gate
     arm()
     data = stream(105.0, 106.0) + stream(105.5, 115.0)
-    out = run(data)
-    assert out.endswith(stream(105.5, 115.0)[188:])
+    assert run(data) == data
+
+
+def test_a_duplicate_pcr_in_the_replay_is_still_skipped(resv, gate, tmp_path):
+    arm, run = gate
+    arm()
+    data = stream(101.0, 105.0) + packet(PID, 105.0) + stream(105.1, 120.0)
+    assert run(data) == data[offset_of_pcr(data, 110.1):]
+    assert "skipped 9.0s" in (tmp_path / "delaybuf.log").read_text()
+
+
+def test_a_jump_from_the_replay_straight_past_the_seam_passes_everything(gate):
+    arm, run = gate
+    arm()
+    data = stream(101.0, 103.0) + stream(114.0, 118.0)
+    assert run(data) == data
+
+
+def test_a_discontinuity_inside_the_replay_gives_back_what_was_held(gate):
+    arm, run = gate
+    arm()
+    data = stream(101.0, 115.0, disc_at=106.0)
+    assert run(data) == data
+
+
+def test_a_replay_whose_pcr_stops_is_released_at_the_hold_limit(resv, gate, tmp_path):
+    arm, run = gate
+    arm()
+    data = stream(101.0, 102.0) + packet(PID) * (resv.REPLAY_HOLD_BYTES // 188 + 10)
+    assert run(data, chunk=65536) == data
+    assert "PCR not advancing" in (tmp_path / "delaybuf.log").read_text()
+
+
+def test_a_first_pcr_beyond_the_hold_limit_is_not_taken(resv, gate, tmp_path):
+    arm, run = gate
+    arm()
+    data = packet(PID) * (resv.REPLAY_HOLD_BYTES // 188 + 10) + stream(101.0, 120.0)
+    assert run(data, chunk=len(data)) == data
+    assert "no PCR within the hold limit" in (tmp_path / "delaybuf.log").read_text()
+
+
+def test_a_replay_larger_than_the_hold_cap_passes_everything(resv, gate, tmp_path):
+    arm, run = gate
+    arm()
+    resv.REPLAY_HOLD_MAX_BYTES = 20_000
+    data = stream(101.0, 120.0)
+    assert run(data) == data
+    assert "hold cap" in (tmp_path / "delaybuf.log").read_text()
 
 
 def test_whole_packets_come_out_even_from_odd_chunks(gate):
@@ -140,17 +186,45 @@ class Replayed:
         return "http://edge.test/live/stream.ts"
 
 
-def test_a_held_replay_still_counts_as_arrival(resv, monkeypatch):
-    resv.REPLAY_SKIP = True
-    resv.GIVEUP_TRIES = 0
-    resv.parser.pcr_pid = PID
-    resv.parser.last_pcr = SEAM
+@pytest.fixture
+def connect_once(resv, monkeypatch):
+    def go(response):
+        resv.REPLAY_SKIP = True
+        resv.GIVEUP_TRIES = 0
+        resv.parser.pcr_pid = PID
+        resv.parser.last_pcr = SEAM
+        monkeypatch.setattr(resv.urllib.request, "urlopen", lambda *a, **k: response)
+        monkeypatch.setattr(resv.time, "sleep", lambda _s: resv.stop.set())
+        resv.fetcher()
+
+    return go
+
+
+class Watched(Replayed):
+    def __init__(self, resv, data):
+        super().__init__(data)
+        self.resv = resv
+        self.seen = []
+
+    def read(self, size):
+        self.seen.append((self.resv.in_total, self.resv.arrived_total))
+        return super().read(size)
+
+
+def test_a_held_replay_counts_as_arrival_while_it_is_held(resv, connect_once):
     replay = stream(101.0, 109.0)
-    monkeypatch.setattr(resv.urllib.request, "urlopen", lambda *a, **k: Replayed(replay))
-    monkeypatch.setattr(resv.time, "sleep", lambda _s: resv.stop.set())
-    resv.fetcher()
-    assert resv.in_total == 0
-    assert resv.arrived_total == len(replay)
+    response = Watched(resv, replay)
+    connect_once(response)
+    assert response.seen[-1] == (0, len(replay))
+
+
+def test_a_connection_that_ends_before_the_seam_gives_back_what_was_held(
+    resv, connect_once, tmp_path
+):
+    replay = stream(101.0, 109.0)
+    connect_once(Replayed(replay))
+    assert resv.in_total == len(replay)
+    assert "connection ended before the seam" in (tmp_path / "delaybuf.log").read_text()
 
 
 class Ticks:

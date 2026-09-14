@@ -69,6 +69,8 @@ GIVEUP_TRIES = int(os.getenv("RESV_GIVEUP_TRIES", "0"))               # exit aft
 REPLAY_SKIP = os.getenv("RESV_REPLAY_SKIP", "0") == "1"
 REPLAY_MAX_S = float(os.getenv("RESV_REPLAY_MAX_S", "60"))
 REPLAY_HOLD_BYTES = 1024 * 1024
+REPLAY_HOLD_MAX_BYTES = 96 * 1024 * 1024
+REPLAY_STEP_MAX_S = 10.0
 TS_WRAP_S = (1 << 33) / 90000.0                                       # PCR base wraps every ~26.5h
 
 FFMPEG_BIN = os.getenv("RESV_FFMPEG_BIN", "/usr/local/bin/ffmpeg")    # Dispatcharr AIO container default
@@ -343,16 +345,17 @@ parser = TsParser()
 
 replay_seam = None
 replay_held = bytearray()
+replay_scan = None
 replay_first = None
 replay_prev = None
-replay_dropped = 0
+replay_advanced_at = 0
 
 
 def arm_replay_skip(allowed=True):
-    global replay_seam, replay_first, replay_prev, replay_dropped
+    global replay_seam, replay_scan, replay_first, replay_prev, replay_advanced_at
     replay_held.clear()
-    replay_first = replay_prev = None
-    replay_dropped = 0
+    replay_scan = replay_first = replay_prev = None
+    replay_advanced_at = 0
     ready = allowed and REPLAY_SKIP and parser.pcr_pid is not None and parser.last_pcr is not None
     replay_seam = (parser.pcr_pid, parser.last_pcr) if ready else None
 
@@ -367,17 +370,31 @@ def _release_replay(reason):
     return out
 
 
+def release_held_replay():
+    if replay_seam is None or not replay_held:
+        return b""
+    return _release_replay("connection ended before the seam")
+
+
 def skip_replay(data):
-    global replay_seam, replay_first, replay_prev, replay_dropped
+    global replay_seam, replay_scan, replay_first, replay_prev, replay_advanced_at
     if replay_seam is None:
         return data
-    replay_held.extend(data)
     held = replay_held
+    held.extend(data)
+    if len(held) > REPLAY_HOLD_MAX_BYTES:
+        return _release_replay("replay longer than the hold cap")
+    if replay_scan is None:
+        start = ts_sync(held, 0)
+        if start < 0:
+            return _release_replay("no TS sync within the hold limit") if len(held) > REPLAY_HOLD_BYTES else b""
+        replay_scan = replay_advanced_at = start
     pid_seam, seam = replay_seam
-    i = ts_sync(held, 0)
-    if i < 0:
-        return _release_replay("no TS sync within the hold limit") if len(held) > REPLAY_HOLD_BYTES else b""
+    i = replay_scan
     while i + 188 <= len(held):
+        if i - replay_advanced_at > REPLAY_HOLD_BYTES:
+            return _release_replay("no PCR within the hold limit" if replay_first is None
+                                   else "PCR not advancing through the replay")
         if held[i] != 0x47:
             return _release_replay("lost TS sync")
         found = packet_pcr(held, i)
@@ -386,29 +403,32 @@ def skip_replay(data):
             if disc:
                 return _release_replay("discontinuity flag")
             ahead = (pcr - seam) % TS_WRAP_S
-            if 0 < ahead < TS_WRAP_S / 2:
-                if replay_first is None:
-                    return _release_replay("")
-                skipped = (seam - replay_first) % TS_WRAP_S
-                out = bytes(held[i:])
-                log(f"replay after reconnect: skipped {skipped:.1f}s "
-                    f"({(i + replay_dropped) / 1e6:.1f}MB) already delivered", stderr=False)
-                held.clear()
-                replay_seam = None
-                return out
+            past_seam = 0 < ahead < TS_WRAP_S / 2
             if replay_first is None:
+                if past_seam:
+                    return _release_replay("")
                 behind = (seam - pcr) % TS_WRAP_S
                 if behind > REPLAY_MAX_S:
                     return _release_replay(f"{behind:.0f}s back is beyond RESV_REPLAY_MAX_S")
-                replay_first = pcr
-            elif not 0 < (pcr - replay_prev) % TS_WRAP_S < 10.0:
-                return _release_replay("PCR not advancing through the replay")
-            replay_prev = pcr
+                replay_first = replay_prev = pcr
+                replay_advanced_at = i
+            else:
+                step = (pcr - replay_prev) % TS_WRAP_S
+                if step >= REPLAY_STEP_MAX_S:
+                    return _release_replay("PCR not advancing through the replay")
+                if step > 0:
+                    replay_prev = pcr
+                    replay_advanced_at = i
+                if past_seam:
+                    skipped = (seam - replay_first) % TS_WRAP_S
+                    out = bytes(held[i:])
+                    log(f"replay after reconnect: skipped {skipped:.1f}s "
+                        f"({i / 1e6:.1f}MB) already delivered", stderr=False)
+                    held.clear()
+                    replay_seam = None
+                    return out
         i += 188
-    if replay_first is None:
-        return _release_replay("no PCR within the hold limit") if len(held) > REPLAY_HOLD_BYTES else b""
-    replay_dropped += i
-    del held[:i]
+    replay_scan = i
     return b""
 
 
@@ -530,8 +550,21 @@ def stderr_watcher(ff):
         relay(pending)
 
 
+def ingest(d):
+    global buf_bytes, in_total
+    with cond:
+        while buf_bytes >= MAX_BYTES and not stop.is_set():
+            cond.wait(1)
+        buf.append(d)
+        buf_bytes += len(d)
+        in_total += len(d)
+        in_marks.append((time.monotonic(), in_total))
+        cond.notify_all()
+    parser.feed(d)                                                    # observe outside the lock
+
+
 def fetcher():
-    global buf_bytes, in_total, arrived_total, reconnects, upstream_eof, cur_response, flush_pending
+    global buf_bytes, arrived_total, reconnects, upstream_eof, cur_response, flush_pending
     backoff = 1
     first = True
     tries_without_data = 0
@@ -576,22 +609,16 @@ def fetcher():
                 #                                                       hammer the provider at 1/s forever
                 arrived_total += len(d)
                 d = skip_replay(d)
-                if not d:
-                    continue
-                with cond:
-                    while buf_bytes >= MAX_BYTES and not stop.is_set():
-                        cond.wait(1)
-                    buf.append(d)
-                    buf_bytes += len(d)
-                    in_total += len(d)
-                    in_marks.append((time.monotonic(), in_total))
-                    cond.notify_all()
-                parser.feed(d)                                        # observe outside the lock
+                if d:
+                    ingest(d)
         except Exception as e:
             log(f"upstream error {type(e).__name__}: {e}; retry in {backoff}s")
         if stop.is_set():
             break
-        if in_total == 0:
+        held = release_held_replay()
+        if held:
+            ingest(held)
+        if arrived_total == 0:
             tries_without_data += 1
             if GIVEUP_TRIES and tries_without_data >= GIVEUP_TRIES:
                 log(f"giving up: no data after {tries_without_data} upstream attempts "
