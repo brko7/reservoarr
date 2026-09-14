@@ -30,6 +30,12 @@ name: registry-pr
 #   job fails loud with instructions.
 
 on:
+  # Primary trigger is the explicit `gh workflow run` dispatch from the final
+  # step of release.yml. The workflow_run trigger below is only a defensive
+  # fallback: auto-tag.yml dispatches release.yml against the TAG ref, and
+  # GitHub's workflow_run event does not fire for tag-associated runs, so it
+  # never sees the normal release path (issue #43). It would fire only for a
+  # branch-triggered release; this job is idempotent, so that is harmless.
   workflow_run:
     workflows: [release]
     types: [completed]

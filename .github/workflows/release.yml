@@ -12,6 +12,7 @@ on:
 
 permissions:
   contents: write
+  actions: write    # gh workflow run registry-pr.yml (final step)
 
 jobs:
   build:
@@ -110,3 +111,24 @@ jobs:
           files: |
             ${{ steps.zip.outputs.out }}
             reservoarr.py
+
+      - name: Dispatch registry-pr.yml (open the Dispatcharr/Plugins bump PR)
+        # Why an explicit dispatch and not registry-pr.yml's workflow_run trigger:
+        # auto-tag.yml dispatches this build with `--ref "$TAG"`, so this run is
+        # associated with a TAG, not a branch. GitHub's workflow_run event does
+        # not fire for tag-associated triggering runs, so registry-pr.yml's
+        # workflow_run trigger never sees this release (see issue #43). Dispatch
+        # it here instead, as the LAST step — registry-pr.yml validates that the
+        # release asset URL is reachable, so it must run only after the release
+        # and its assets exist. This mirrors auto-tag.yml → release.yml, and
+        # `gh workflow run` (the workflow_dispatch API) DOES trigger downstream
+        # workflows even under GITHUB_TOKEN — unlike push/PR events. registry-pr
+        # runs on the default branch (main) and takes the tag as an input, so no
+        # --ref is needed. It is idempotent, so if its workflow_run fallback ever
+        # does fire (a branch-triggered release), the duplicate is harmless.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.ver.outputs.tag }}
+        run: |
+          gh workflow run registry-pr.yml -f tag="$TAG"
+          echo "::notice::dispatched registry-pr.yml for $TAG"
