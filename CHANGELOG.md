@@ -2,6 +2,22 @@
 
 All notable changes to `reservoarr.py`. Each version's invariants are earned by a real production failure — read this before changing the script.
 
+## [6.3.5] — 2026-09-14
+
+New default-off tunable ([@PilaScat](https://github.com/PilaScat), [#40](https://github.com/brko7/reservoarr/issues/40)). **No change for existing installs** — `RESV_REPLAY_SKIP=0` is the default and leaves the output byte-for-byte as in 6.3.4.
+
+- **New `RESV_REPLAY_SKIP=1` tunable that drops what an edge resends after a plain reconnect.** On some CDNs a connection ends with a clean EOF every few minutes and the next one starts 9–25s behind the point the old one reached. The fetcher appended that replay, so viewers saw the same seconds twice; and because `on_reconnect()` re-anchors the PCR chain, the replay was banked as new cushion on every reconnect instead of self-draining. With the tunable on, the fetcher remembers the last PCR taken before the seam and drops packets of the new connection until the PCR passes it. Every seam it cannot place passes through as before: a replay further back than `RESV_REPLAY_MAX_S` (60s), a discontinuity flag, a PCR that stops advancing, no PCR or no TS sync within 1 MB, and any flushing reconnect. This reopens the "EOF-reconnect overlap-replay dedup" row of `docs/INVARIANTS.md`, now as opt-in. Measured on `cdn_sim --front 25 --eof-at 40`:
+
+  |  | `RESV_REPLAY_SKIP=0` | `RESV_REPLAY_SKIP=1` |
+  |---|---|---|
+  | cushion | 20 → **42s** | 20 → 20 → 21s |
+  | ffmpeg `timestamp discontinuity` | 3 | 0 |
+  | log | — | `replay after reconnect: skipped 23.8s (7.1MB) already delivered` |
+
+- **The stall watchdog (#4) follows bytes arriving from upstream, not bytes ingested.** While the gate holds a replay, `in_total` does not move; an edge that delivered a replay at realtime for longer than `RESV_STALL_S` would have tripped a reconnect in the middle of it. A new `arrived_total` counts every byte read, dropped or kept, and the watchdog watches that. With `RESV_REPLAY_SKIP=0` the two counters advance together.
+
+- `docs/TELEMETRY.md` documents the two `replay after reconnect: …` lines; `docs/TUNABLES.md` the two tunables. New tests: 10 unit tests of the gate plus 3 for the watchdog's counter in `tests/unit/test_replay_skip.py`, and an e2e on the forced-EOF path with the gate on (`run_pipeline(replay_skip=True)`).
+
 ## [6.3.4] — 2026-09-13
 
 New default-off tunable ([@PilaScat](https://github.com/PilaScat), [PR #39](https://github.com/brko7/reservoarr/pull/39)). **No change for existing installs** — `RESV_GIVEUP_TRIES=0` is the default and preserves today's retry-forever behaviour.
