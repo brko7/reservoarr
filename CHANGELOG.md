@@ -2,6 +2,21 @@
 
 All notable changes to `reservoarr.py`. Each version's invariants are earned by a real production failure — read this before changing the script.
 
+## [6.3.6] — 2026-09-14
+
+New default-off tunable ([@PilaScat](https://github.com/PilaScat)). **No change for existing installs** — with `RESV_TS_CHANNEL` unset the ffmpeg command and the output path are exactly those of 6.3.5.
+
+- **New `RESV_TS_CHANNEL={channelId}` tunable that keeps a channel's output timeline continuous across processes.** ffmpeg rebases its output to start near PTS 0, so every process Dispatcharr spawns for a channel — a failover to the next stream, the fallback slate, the switch back from it — starts the timeline over. Downstream the switch arrives inside one client connection as a PTS jump back by however long the previous process ran. Jellyfin's live transcoder runs with `-copyts` and drops every frame that is older than what it has already written, so it stops producing HLS segments until the new timestamps catch up. Measured on Dispatcharr 0.31.0 with Jellyfin 12.0.0, a return from a 2-minute fallback slate: slate at PTS 120.1s, next stream from 0.12s, the transcoder logged `Non-monotonic DTS; previous: 11481600, current: 960`, its frame counter stayed at 632, and all 30 test viewers stalled for about as long as the slate had played. With the tunable set, each process reads `{RESV_LOG_DIR}/pts-<id>.json`, projects the previous process's last output PTS to now, and starts one second past it with `-output_ts_offset`; the first process of a channel starts on the wall clock. The last output PTS is read off ffmpeg's own output, which now goes through a relay thread to stdout byte for byte, and is written back every 2s and on exit. When two processes overlap during a switch, the later timeline is kept. Three processes in a row on `cdn_sim`:
+
+  |  | seam 1 | seam 2 |
+  |---|---|---|
+  | `RESV_TS_CHANNEL` unset | −22.9s | −22.8s |
+  | `RESV_TS_CHANNEL=9` | +3.4s | +3.3s |
+
+- Not `-copyts` (invariant #5): ffmpeg still rebases the input, and the offset moves every output stream by the same amount. Dispatcharr substitutes `{channelId}` anywhere in the profile parameters, e.g. `/usr/bin/env RESV_TS_CHANNEL={channelId} /data/reservoarr/reservoarr.py {streamUrl} {userAgent}`.
+
+- `docs/TUNABLES.md`, `docs/TELEMETRY.md` (the `ts timeline:` line) and `docs/INVARIANTS.md` (#2, #5) updated. New tests: 15 in `tests/unit/test_ts_timeline.py` (opt-in, command, channel id sanitising, projection, stale and corrupt state, PES PTS parsing, 33-bit wrap, the later writer winning, the relay), and 2 e2e in `tests/e2e/test_ts_timeline.py` that run two processes back to back with and without the tunable.
+
 ## [6.3.5] — 2026-09-14
 
 New default-off tunable ([@PilaScat](https://github.com/PilaScat), [#40](https://github.com/brko7/reservoarr/issues/40) / [PR #42](https://github.com/brko7/reservoarr/pull/42)). **No change for existing installs** — `RESV_REPLAY_SKIP=0` is the default and leaves the output byte-for-byte as in 6.3.4.

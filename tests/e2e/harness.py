@@ -97,6 +97,8 @@ def run_pipeline(
     corrupt_from: float | None = None,
     corrupt_rate: int = 5,
     replay_skip: bool = False,
+    ts_channel: str | None = None,
+    log_dir: Path | None = None,
 ) -> Run:
     """Run cdn_sim + reservoarr.py for duration_s seconds; return collected
     artifacts. Caller asserts on Run.stats_lines() / Run.log_text() / out_ts.
@@ -108,8 +110,8 @@ def run_pipeline(
     at 30 begins ~5s after the client connects."""
     port = _free_port()
     out_ts = tmp_path / "out.ts"
-    log_dir = tmp_path / "logs"
-    log_dir.mkdir()
+    log_dir = log_dir or tmp_path / "logs"
+    log_dir.mkdir(exist_ok=True)
     log_file = log_dir / "delaybuf.log"
 
     cdn_argv = [sys.executable, str(CDN_SIM), str(capture), str(rate_bps),
@@ -131,6 +133,8 @@ def run_pipeline(
     env["RESV_LOG_DIR"] = str(log_dir)
     if replay_skip:
         env["RESV_REPLAY_SKIP"] = "1"
+    if ts_channel:
+        env["RESV_TS_CHANNEL"] = ts_channel
     # Use the ffmpeg path the test runner picked (mac vs linux differ).
     if "RESV_FFMPEG_BIN" not in env:
         ffmpeg = shutil.which("ffmpeg")
@@ -189,3 +193,14 @@ def ffprobe_streams(path: Path) -> list[dict]:
         text=True,
     )
     return json.loads(out).get("streams", [])
+
+
+def ffprobe_video_pts(path: Path) -> list[float]:
+    ffprobe = os.environ.get("FFPROBE_BIN") or shutil.which("ffprobe") or "ffprobe"
+    out = subprocess.check_output(
+        [ffprobe, "-v", "error", "-select_streams", "v:0", "-show_entries", "packet=pts_time",
+         "-of", "csv=p=0", str(path)],
+        text=True,
+    )
+    values = (line.split(",")[0].strip() for line in out.splitlines())
+    return [float(v) for v in values if v and v != "N/A"]

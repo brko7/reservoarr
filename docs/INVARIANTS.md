@@ -7,10 +7,10 @@ short list of rules anyone editing `reservoarr.py` must respect.
 | # | Invariant | Why |
 |---|---|---|
 | 1 | **Byte-rate pacing**, NEVER `ffmpeg -re` / `-readrate` | Corrupt packets with garbage DTS make `-re` sleep for >25s with a full reservoir. PCR is a *measurement* input — a garbage sample is dropped, never slept on. |
-| 2 | **stdout carries only the TS stream** | Dispatcharr's relay pipe consumes stdout. Logging goes to stderr + the log file. |
+| 2 | **stdout carries only the TS stream** | Dispatcharr's relay pipe consumes stdout. Logging goes to stderr + the log file. With `RESV_TS_CHANNEL` ffmpeg's stdout reaches it through `stdout_relay()`, byte for byte. |
 | 3 | **Audio re-encoded to AC3** (`-c:a ac3 -b:a 192k -ac 2`) | Upstream-blessed fix for [Dispatcharr #1122](https://github.com/Dispatcharr/Dispatcharr/issues/1122) (Plex MDE failures on AAC streams). `-c:a copy` verified live 2026-06-16: produced **no audio at all** in Plex, not just desync. |
 | 4 | **`-bsf:v dump_extra=freq=keyframe`** | Re-injects SPS/PPS at every keyframe so mid-stream tune-in (channel switch) doesn't go black. Required in ffmpeg 7.x and 8.x. |
-| 5 | **No `-copyts`** | Causes A/V desync on these streams. |
+| 5 | **No `-copyts`** | Causes A/V desync on these streams. The `-output_ts_offset` of `RESV_TS_CHANNEL` (6.3.6) is not `-copyts`: ffmpeg still rebases the input, and the offset shifts every output stream by the same amount. |
 | 6 | **stdlib-only at runtime** | Dispatcharr's container has no pip available for end-users. Dev/test deps live in `pyproject.toml`'s `[dev]` extra. |
 | 7 | **Single deployable file** | Spawned per channel-tune as `reservoarr.py {streamUrl} {userAgent}`. |
 | 8 | **#5 detector defaults to log-only** (`RESV_TS_RECONNECT=0`) | The ingest-side corruption detector ships in observe mode pending more arming evidence (see [CHANGELOG](../CHANGELOG.md)). Setting `=1` arms the forced reconnect. |

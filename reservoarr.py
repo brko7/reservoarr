@@ -29,6 +29,7 @@ stats  -> /data/scripts/logs/delaybuf.log
 Dispatcharr stops the channel by signalling THIS pid only: on SIGTERM we
 reap ffmpeg; on SIGKILL the broken pipes make ffmpeg exit on its own.
 """
+import json
 import os
 import re
 import signal
@@ -97,6 +98,10 @@ FFMPEG_CMD = [
     "-c:a", "ac3", "-b:a", "192k", "-ac", "2",
     "-f", "mpegts", "-muxdelay", "0", "-muxpreload", "0", "pipe:1",
 ]
+TS_CHANNEL = re.sub(r"[^A-Za-z0-9_-]", "", os.getenv("RESV_TS_CHANNEL", ""))[:64]
+TS_SEAM_S = 1.0
+TS_SAVE_EVERY_S = 2.0
+PTS_WRAP = 1 << 33
 
 buf = deque()
 buf_bytes = 0
@@ -163,6 +168,112 @@ def log(msg, stderr=True, file=True):
     if stderr:
         sys.stderr.write(f"[delaybuf] {msg}\n")
         sys.stderr.flush()
+
+
+def ffmpeg_cmd(ts_offset=None):
+    if ts_offset is None:
+        return FFMPEG_CMD
+    return [*FFMPEG_CMD[:-1], "-output_ts_offset", f"{ts_offset:.6f}", FFMPEG_CMD[-1]]
+
+
+def timeline_path():
+    return os.path.join(LOG_DIR, f"pts-{TS_CHANNEL}.json")
+
+
+def timeline_projection(path, now):
+    try:
+        with open(path) as f:
+            state = json.load(f)
+        return float(state["end"]) + max(now - float(state["wall"]), 0.0)
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def pes_pts(buf_, i):
+    if not buf_[i + 1] & 0x40 or not buf_[i + 3] & 0x10:
+        return None
+    p = i + 4
+    if buf_[i + 3] & 0x20:
+        p += 1 + buf_[i + 4]
+    if p + 14 > i + 188 or buf_[p:p + 3] != b"\x00\x00\x01" or not buf_[p + 7] & 0x80:
+        return None
+    b = buf_[p + 9:p + 14]
+    return ((b[0] >> 1) & 0x07) << 30 | b[1] << 22 | (b[2] >> 1) << 15 | b[3] << 7 | b[4] >> 1
+
+
+class Timeline:
+    def __init__(self, path, now):
+        self.path = path
+        projected = timeline_projection(path, now)
+        self.origin = now if projected is None else max(now, projected + TS_SEAM_S)
+        self.offset = self.origin % TS_WRAP_S
+        self.last_pts = None
+        self.wraps = 0
+        self.high = None
+        self.saved_at = float("-inf")
+
+    def observe(self, pts):
+        if self.last_pts is None and pts < self.offset * 90000 - PTS_WRAP // 2:
+            self.wraps = 1
+        elif self.last_pts is not None and pts < self.last_pts - PTS_WRAP // 2:
+            self.wraps += 1
+        elif self.last_pts is not None and pts > self.last_pts + PTS_WRAP // 2:
+            return
+        self.last_pts = pts
+        seconds = (self.wraps * PTS_WRAP + pts) / 90000.0
+        if self.high is None or seconds > self.high:
+            self.high = seconds
+
+    def end(self):
+        if self.high is None:
+            return None
+        return self.origin - self.offset + self.high
+
+    def save(self, now):
+        self.saved_at = time.monotonic()
+        end = self.end()
+        if end is None:
+            return
+        projected = timeline_projection(self.path, now)
+        if projected is not None and projected > end:
+            return
+        tmp = f"{self.path}.{os.getpid()}"
+        try:
+            with open(tmp, "w") as f:
+                json.dump({"end": end, "wall": now}, f)
+            os.replace(tmp, self.path)
+        except OSError:
+            pass
+
+
+def stdout_relay(ff, timeline, out=None):
+    out = out or sys.stdout.buffer
+    carry = b""
+    try:
+        while True:
+            chunk = os.read(ff.stdout.fileno(), CHUNK)
+            if not chunk:
+                break
+            out.write(chunk)
+            out.flush()
+            data = carry + chunk
+            i = data.find(0x47)
+            while 0 <= i and i + 188 <= len(data):
+                if data[i] != 0x47:
+                    i = data.find(0x47, i + 1)
+                    continue
+                pts = pes_pts(data, i)
+                if pts is not None:
+                    timeline.observe(pts)
+                i += 188
+            carry = data[i:] if 0 <= i else b""
+    except (BrokenPipeError, OSError, ValueError):
+        pass
+    finally:
+        try:
+            ff.stdout.close()
+        except Exception:
+            pass
 
 
 def ts_sync(buf_, start):
@@ -695,8 +806,14 @@ def main():
             cond.wait(0.5)
     log(f"prefill done: {buf_bytes / 1e6:.1f}MB in {time.monotonic() - t0:.1f}s, releasing stream to ffmpeg")
 
-    ff = subprocess.Popen(FFMPEG_CMD, stdin=subprocess.PIPE, stdout=None, stderr=subprocess.PIPE, bufsize=0)
+    timeline = Timeline(timeline_path(), time.time()) if TS_CHANNEL else None
+    ff = subprocess.Popen(ffmpeg_cmd(timeline.offset if timeline else None), stdin=subprocess.PIPE,
+                          stdout=subprocess.PIPE if timeline else None, stderr=subprocess.PIPE, bufsize=0)
     threading.Thread(target=stderr_watcher, args=(ff,), daemon=True).start()
+    if timeline:
+        log(f"ts timeline: channel {TS_CHANNEL} starts at {timeline.origin:.3f}s "
+            f"(output offset {timeline.offset:.3f}s)")
+        threading.Thread(target=stdout_relay, args=(ff, timeline), daemon=True).start()
     if STALL_S > 0:
         threading.Thread(target=stall_watchdog, daemon=True).start()
 
@@ -768,6 +885,8 @@ def main():
                 ff.stdin.write(aligned)
                 out_since_stats += len(aligned)
             now = time.monotonic()
+            if timeline and now - timeline.saved_at >= TS_SAVE_EVERY_S:
+                timeline.save(time.time())
             if now - last_stats >= STATS_EVERY_S:
                 orate = out_since_stats / (now - last_stats)
                 src = "pcr" if cush_pcr is not None else "byte"
@@ -827,6 +946,8 @@ def main():
                 ff.kill()
             except Exception:
                 pass
+        if timeline:
+            timeline.save(time.time())
         log(f"stream wrapper exit (ffmpeg rc={ff.returncode})")
 
 
