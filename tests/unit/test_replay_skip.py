@@ -127,3 +127,52 @@ def test_a_stream_without_pcr_is_released_at_the_hold_limit(resv, gate):
     arm()
     data = packet(PID) * (resv.REPLAY_HOLD_BYTES // 188 + 10)
     assert run(data, chunk=65536) == data
+
+
+class Replayed:
+    def __init__(self, data, chunk=1000):
+        self._chunks = [data[i:i + chunk] for i in range(0, len(data), chunk)]
+
+    def read(self, _size):
+        return self._chunks.pop(0) if self._chunks else b""
+
+    def geturl(self):
+        return "http://edge.test/live/stream.ts"
+
+
+def test_a_held_replay_still_counts_as_arrival(resv, monkeypatch):
+    resv.REPLAY_SKIP = True
+    resv.GIVEUP_TRIES = 0
+    resv.parser.pcr_pid = PID
+    resv.parser.last_pcr = SEAM
+    replay = stream(101.0, 109.0)
+    monkeypatch.setattr(resv.urllib.request, "urlopen", lambda *a, **k: Replayed(replay))
+    monkeypatch.setattr(resv.time, "sleep", lambda _s: resv.stop.set())
+    resv.fetcher()
+    assert resv.in_total == 0
+    assert resv.arrived_total == len(replay)
+
+
+class Ticks:
+    def __init__(self, resv, clock, count, arriving):
+        self.resv, self.clock, self.count, self.arriving = resv, clock, count, arriving
+
+    def wait(self, seconds):
+        self.clock[0] += seconds
+        if self.arriving:
+            self.resv.arrived_total += 188
+        self.count -= 1
+        return self.count < 0
+
+
+@pytest.mark.parametrize(("arriving", "fires"), [(True, False), (False, True)])
+def test_the_stall_watchdog_follows_arrival_not_ingest(resv, monkeypatch, arriving, fires):
+    clock = [1000.0]
+    fired = []
+    monkeypatch.setattr(resv.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(resv, "force_upstream_reconnect",
+                        lambda reason, flush=True: fired.append(reason) or True)
+    monkeypatch.setattr(resv, "stop", Ticks(resv, clock, round(resv.STALL_S) + 10, arriving))
+    resv.stall_watchdog()
+    assert resv.in_total == 0
+    assert bool(fired) is fires

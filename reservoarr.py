@@ -99,6 +99,7 @@ FFMPEG_CMD = [
 buf = deque()
 buf_bytes = 0
 in_total = 0
+arrived_total = 0
 reconnects = 0
 upstream_eof = False
 stop = threading.Event()
@@ -464,7 +465,7 @@ def stall_watchdog():
     last_in = -1
     last_adv = time.monotonic()
     while not stop.wait(2):
-        cur = in_total
+        cur = arrived_total
         if cur != last_in:
             last_in = cur
             last_adv = time.monotonic()
@@ -530,7 +531,7 @@ def stderr_watcher(ff):
 
 
 def fetcher():
-    global buf_bytes, in_total, reconnects, upstream_eof, cur_response, flush_pending
+    global buf_bytes, in_total, arrived_total, reconnects, upstream_eof, cur_response, flush_pending
     backoff = 1
     first = True
     tries_without_data = 0
@@ -573,6 +574,7 @@ def fetcher():
                 backoff = 1                                           # reset only once data flows: an empty
                 #                                                       connect must keep backing off, not
                 #                                                       hammer the provider at 1/s forever
+                arrived_total += len(d)
                 d = skip_replay(d)
                 if not d:
                     continue
