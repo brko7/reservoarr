@@ -106,7 +106,7 @@ def test_a_corrupt_state_falls_back_to_the_wall_clock(tmp_path):
 
 def test_pes_pts_reads_the_stamp(tmp_path):
     resv = load(tmp_path)
-    for pts in (0, 90000, 123456789, resv.PTS_WRAP - 1):
+    for pts in (0, 90000, 123456789, (1 << 33) - 1):
         assert resv.pes_pts(pes_packet(pts), 0) == pts
     assert resv.pes_pts(pes_packet(90000, adaptation=7), 0) == 90000
 
@@ -147,14 +147,54 @@ def test_a_first_pts_already_past_the_wrap_counts_as_wrapped(tmp_path):
 def test_save_keeps_the_later_of_two_writers(tmp_path):
     resv = load(tmp_path, RESV_TS_CHANNEL="7")
     newer = resv.Timeline(resv.timeline_path(), 1000.0)
-    newer.observe(int(newer.offset * 90000) + 90000 * 30)
+    newer.observe(int(newer.offset * 90000) + 90000 * 20)
     newer.save(1000.0)
     older = resv.Timeline(resv.timeline_path(), 1000.0)
     older.origin, older.offset = 900.0, 900.0
     older.observe(int(900.0 * 90000) + 90000 * 10)
     older.save(1001.0)
     state = json.loads(Path(resv.timeline_path()).read_text())
-    assert state == {"end": 1030.0, "wall": 1000.0}
+    assert state == {"end": 1020.0, "wall": 1000.0}
+
+
+def test_a_pts_far_ahead_of_the_wall_clock_is_ignored_and_counted(tmp_path):
+    resv = load(tmp_path, RESV_TS_CHANNEL="7")
+    timeline = resv.Timeline(resv.timeline_path(), 200_000.0)
+    base = int(timeline.offset * 90000)
+    timeline.observe(base + 90000 * 10)
+    timeline.observe(base + 90000 * 3600)
+    timeline.observe(base + 90000 * 12)
+    assert abs(timeline.end() - 200_012.0) < 1e-4
+    assert timeline.rejected == 1
+
+
+def test_a_garbage_first_packet_cannot_seed_the_timeline_ahead(tmp_path):
+    resv = load(tmp_path, RESV_TS_CHANNEL="7")
+    timeline = resv.Timeline(resv.timeline_path(), 200_000.0)
+    base = int(timeline.offset * 90000)
+    timeline.observe((base + 90000 * 7200) % (1 << 33))
+    assert timeline.end() is None
+    timeline.observe(base + 90000)
+    assert abs(timeline.end() - 200_001.0) < 1e-4
+
+
+def test_output_behind_the_wall_clock_after_stalls_keeps_its_wrap(tmp_path):
+    resv = load(tmp_path, RESV_TS_CHANNEL="7")
+    origin = resv.TS_WRAP_S * 3 - 100.0
+    timeline = resv.Timeline(resv.timeline_path(), origin)
+    pts = int(((timeline.offset + 3600.0) % resv.TS_WRAP_S) * 90000)
+    timeline.observe(pts, now=timeline.started + 7200.0)
+    assert abs(timeline.end() - (origin + 3600.0)) < 1e-3
+    assert timeline.rejected == 0
+
+
+def test_an_unusable_state_falls_back_to_the_wall_clock(tmp_path):
+    resv = load(tmp_path, RESV_TS_CHANNEL="7")
+    path = Path(resv.timeline_path())
+    for text in ('{"end": 1e10000, "wall": 0}', '{"end": ' + "9" * 400 + ', "wall": 0}',
+                 '{"end": NaN, "wall": 0}', json.dumps({"end": 500.0 + 2 * 86400, "wall": 500.0})):
+        path.write_text(text)
+        assert resv.Timeline(str(path), 500.0).origin == 500.0, text
 
 
 def test_the_tunable_exported_in_the_shell_does_not_leak_into_the_loader(tmp_path, monkeypatch):

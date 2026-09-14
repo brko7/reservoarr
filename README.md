@@ -40,7 +40,7 @@ If you didn't set it as default in step 3, assign it per-channel: Channels → E
 
 That's it. Now [tune a channel](#first-channel-tune) to confirm it's working.
 
-> Tuning (cushion size, watchdog thresholds, log directory, etc.) is via `RESV_*` environment variables on the Dispatcharr container — not plugin UI fields. Defaults match production-validated behaviour and fit most providers. See [docs/TUNABLES.md](docs/TUNABLES.md) before overriding.
+> Tuning (cushion size, watchdog thresholds, log directory, etc.) is via `RESV_*` environment variables on the Dispatcharr container — not plugin UI fields. Defaults match production-validated behaviour and fit most providers. See [docs/TUNABLES.md](docs/TUNABLES.md) before overriding. The one exception is `RESV_TS_CHANNEL`, which is per channel and goes in the profile's parameters, as explained there.
 
 ### Option 2 — Vendored copy + manual Stream Profile
 

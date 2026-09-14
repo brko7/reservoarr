@@ -31,6 +31,7 @@ reap ffmpeg; on SIGKILL the broken pipes make ffmpeg exit on its own.
 """
 import fcntl
 import json
+import math
 import os
 import re
 import signal
@@ -102,8 +103,8 @@ FFMPEG_CMD = [
 TS_CHANNEL = re.sub(r"[^A-Za-z0-9_-]", "", os.getenv("RESV_TS_CHANNEL", ""))[:64]
 TS_SEAM_S = 1.0
 TS_SAVE_EVERY_S = 2.0
+TS_MAX_LEAD_S = 30.0
 RELAY_DRAIN_S = 2.0
-PTS_WRAP = 1 << 33
 
 buf = deque()
 buf_bytes = 0
@@ -186,9 +187,13 @@ def timeline_projection(path, now):
     try:
         with open(path) as f:
             state = json.load(f)
-        return float(state["end"]) + max(now - float(state["wall"]), 0.0)
-    except (OSError, ValueError, KeyError, TypeError):
+        end, wall = float(state["end"]), float(state["wall"])
+    except (OSError, ValueError, KeyError, TypeError, OverflowError):
         return None
+    if not (math.isfinite(end) and math.isfinite(wall)):
+        return None
+    projected = end + max(now - wall, 0.0)
+    return projected if projected - now < TS_WRAP_S / 2 else None
 
 
 def pes_pts(buf_, i):
@@ -209,27 +214,23 @@ class Timeline:
         projected = timeline_projection(path, now)
         self.origin = now if projected is None else max(now, projected + TS_SEAM_S)
         self.offset = self.origin % TS_WRAP_S
-        self.last_pts = None
-        self.wraps = 0
+        self.started = time.monotonic()
         self.high = None
+        self.rejected = 0
         self.saved_at = float("-inf")
 
-    def observe(self, pts):
-        if self.last_pts is None and pts < self.offset * 90000 - PTS_WRAP // 2:
-            self.wraps = 1
-        elif self.last_pts is not None and pts < self.last_pts - PTS_WRAP // 2:
-            self.wraps += 1
-        elif self.last_pts is not None and pts > self.last_pts + PTS_WRAP // 2:
+    def observe(self, pts, now=None):
+        expected = self.origin + ((time.monotonic() if now is None else now) - self.started)
+        base = self.origin - self.offset + pts / 90000.0
+        seconds = base + round((expected - base) / TS_WRAP_S) * TS_WRAP_S
+        if seconds > expected + TS_MAX_LEAD_S:
+            self.rejected += 1
             return
-        self.last_pts = pts
-        seconds = (self.wraps * PTS_WRAP + pts) / 90000.0
         if self.high is None or seconds > self.high:
             self.high = seconds
 
     def end(self):
-        if self.high is None:
-            return None
-        return self.origin - self.offset + self.high
+        return self.high
 
     def save(self, now):
         self.saved_at = time.monotonic()
@@ -956,6 +957,9 @@ def main():
             relay.join(timeout=RELAY_DRAIN_S)
         if timeline:
             timeline.save(time.time())
+            if timeline.rejected:
+                log(f"ts timeline: ignored {timeline.rejected} output PTS more than "
+                    f"{TS_MAX_LEAD_S:.0f}s ahead of the wall clock")
         log(f"stream wrapper exit (ffmpeg rc={ff.returncode})")
 
 
