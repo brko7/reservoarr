@@ -29,6 +29,7 @@ stats  -> /data/scripts/logs/delaybuf.log
 Dispatcharr stops the channel by signalling THIS pid only: on SIGTERM we
 reap ffmpeg; on SIGKILL the broken pipes make ffmpeg exit on its own.
 """
+import fcntl
 import json
 import os
 import re
@@ -101,6 +102,7 @@ FFMPEG_CMD = [
 TS_CHANNEL = re.sub(r"[^A-Za-z0-9_-]", "", os.getenv("RESV_TS_CHANNEL", ""))[:64]
 TS_SEAM_S = 1.0
 TS_SAVE_EVERY_S = 2.0
+RELAY_DRAIN_S = 2.0
 PTS_WRAP = 1 << 33
 
 buf = deque()
@@ -234,14 +236,16 @@ class Timeline:
         end = self.end()
         if end is None:
             return
-        projected = timeline_projection(self.path, now)
-        if projected is not None and projected > end:
-            return
-        tmp = f"{self.path}.{os.getpid()}"
         try:
-            with open(tmp, "w") as f:
-                json.dump({"end": end, "wall": now}, f)
-            os.replace(tmp, self.path)
+            with open(f"{self.path}.lock", "a") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                projected = timeline_projection(self.path, now)
+                if projected is not None and projected > end:
+                    return
+                tmp = f"{self.path}.{os.getpid()}"
+                with open(tmp, "w") as f:
+                    json.dump({"end": end, "wall": now}, f)
+                os.replace(tmp, self.path)
         except OSError:
             pass
 
@@ -810,10 +814,12 @@ def main():
     ff = subprocess.Popen(ffmpeg_cmd(timeline.offset if timeline else None), stdin=subprocess.PIPE,
                           stdout=subprocess.PIPE if timeline else None, stderr=subprocess.PIPE, bufsize=0)
     threading.Thread(target=stderr_watcher, args=(ff,), daemon=True).start()
+    relay = None
     if timeline:
         log(f"ts timeline: channel {TS_CHANNEL} starts at {timeline.origin:.3f}s "
             f"(output offset {timeline.offset:.3f}s)")
-        threading.Thread(target=stdout_relay, args=(ff, timeline), daemon=True).start()
+        relay = threading.Thread(target=stdout_relay, args=(ff, timeline), daemon=True)
+        relay.start()
     if STALL_S > 0:
         threading.Thread(target=stall_watchdog, daemon=True).start()
 
@@ -946,6 +952,8 @@ def main():
                 ff.kill()
             except Exception:
                 pass
+        if relay:
+            relay.join(timeout=RELAY_DRAIN_S)
         if timeline:
             timeline.save(time.time())
         log(f"stream wrapper exit (ffmpeg rc={ff.returncode})")

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import fcntl
 import importlib.util
 import io
 import json
 import os
 import sys
+import threading
+import time
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -12,6 +15,8 @@ RESERVOIR_PATH = REPO_ROOT / "reservoarr.py"
 
 
 def load(tmp_log_dir, **env):
+    for key in [key for key in os.environ if key.startswith("RESV_") and key != "RESV_FFMPEG_BIN"]:
+        os.environ.pop(key)
     os.environ["RESV_LOG_DIR"] = str(tmp_log_dir)
     os.environ.update(env)
     sys.argv = ["reservoarr", "http://offline/unit-test"]
@@ -150,6 +155,28 @@ def test_save_keeps_the_later_of_two_writers(tmp_path):
     older.save(1001.0)
     state = json.loads(Path(resv.timeline_path()).read_text())
     assert state == {"end": 1030.0, "wall": 1000.0}
+
+
+def test_the_tunable_exported_in_the_shell_does_not_leak_into_the_loader(tmp_path, monkeypatch):
+    monkeypatch.setenv("RESV_TS_CHANNEL", "99")
+    assert load(tmp_path).TS_CHANNEL == ""
+
+
+def test_save_waits_for_the_lock_and_rechecks_what_a_newer_process_wrote(tmp_path):
+    resv = load(tmp_path, RESV_TS_CHANNEL="7")
+    older = resv.Timeline(resv.timeline_path(), 1000.0)
+    older.observe(int(older.offset * 90000) + 90000 * 10)
+    writer = threading.Thread(target=older.save, args=(1000.0,))
+    with open(f"{resv.timeline_path()}.lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        writer.start()
+        time.sleep(0.2)
+        assert writer.is_alive()
+        write_state(resv, end=1030.0, wall=1000.0)
+        fcntl.flock(lock, fcntl.LOCK_UN)
+    writer.join(2)
+    assert not writer.is_alive()
+    assert json.loads(Path(resv.timeline_path()).read_text()) == {"end": 1030.0, "wall": 1000.0}
 
 
 def test_relay_passes_every_byte_and_tracks_pts(tmp_path):
