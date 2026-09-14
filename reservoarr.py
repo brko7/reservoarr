@@ -69,7 +69,7 @@ GIVEUP_TRIES = int(os.getenv("RESV_GIVEUP_TRIES", "0"))               # exit aft
 REPLAY_SKIP = os.getenv("RESV_REPLAY_SKIP", "0") == "1"
 REPLAY_MAX_S = float(os.getenv("RESV_REPLAY_MAX_S", "60"))
 REPLAY_HOLD_BYTES = 1024 * 1024
-REPLAY_HOLD_MAX_BYTES = 96 * 1024 * 1024
+REPLAY_MIN_CUSHION_S = 3.0
 REPLAY_STEP_MAX_S = 10.0
 TS_WRAP_S = (1 << 33) / 90000.0                                       # PCR base wraps every ~26.5h
 
@@ -361,9 +361,9 @@ def arm_replay_skip(allowed=True):
 
 
 def _release_replay(reason):
-    global replay_seam
-    out = bytes(replay_held)
-    replay_held.clear()
+    global replay_seam, replay_held
+    out = replay_held
+    replay_held = bytearray()
     replay_seam = None
     if reason:
         log(f"replay after reconnect: {reason}; passing through", stderr=False)
@@ -376,14 +376,21 @@ def release_held_replay():
     return _release_replay("connection ended before the seam")
 
 
+def reservoir_running_low():
+    crate = parser.content_rate()
+    return crate is not None and buf_bytes < crate * REPLAY_MIN_CUSHION_S
+
+
 def skip_replay(data):
-    global replay_seam, replay_scan, replay_first, replay_prev, replay_advanced_at
+    global replay_seam, replay_held, replay_scan, replay_first, replay_prev, replay_advanced_at
     if replay_seam is None:
         return data
     held = replay_held
     held.extend(data)
-    if len(held) > REPLAY_HOLD_MAX_BYTES:
-        return _release_replay("replay longer than the hold cap")
+    if buf_bytes + len(held) > MAX_BYTES:
+        return _release_replay("replay does not fit in the reservoir")
+    if reservoir_running_low():
+        return _release_replay("reservoir running low")
     if replay_scan is None:
         start = ts_sync(held, 0)
         if start < 0:
@@ -414,19 +421,19 @@ def skip_replay(data):
                 replay_advanced_at = i
             else:
                 step = (pcr - replay_prev) % TS_WRAP_S
-                if step >= REPLAY_STEP_MAX_S:
+                if step > REPLAY_STEP_MAX_S:
                     return _release_replay("PCR not advancing through the replay")
                 if step > 0:
                     replay_prev = pcr
                     replay_advanced_at = i
                 if past_seam:
                     skipped = (seam - replay_first) % TS_WRAP_S
-                    out = bytes(held[i:])
                     log(f"replay after reconnect: skipped {skipped:.1f}s "
                         f"({i / 1e6:.1f}MB) already delivered", stderr=False)
-                    held.clear()
+                    del held[:i]
+                    replay_held = bytearray()
                     replay_seam = None
-                    return out
+                    return held
         i += 188
     replay_scan = i
     return b""
@@ -552,15 +559,17 @@ def stderr_watcher(ff):
 
 def ingest(d):
     global buf_bytes, in_total
-    with cond:
-        while buf_bytes >= MAX_BYTES and not stop.is_set():
-            cond.wait(1)
-        buf.append(d)
-        buf_bytes += len(d)
-        in_total += len(d)
-        in_marks.append((time.monotonic(), in_total))
-        cond.notify_all()
-    parser.feed(d)                                                    # observe outside the lock
+    for start in range(0, len(d), CHUNK):
+        piece = bytes(d[start:start + CHUNK])
+        with cond:
+            while buf_bytes >= MAX_BYTES and not stop.is_set():
+                cond.wait(1)
+            buf.append(piece)
+            buf_bytes += len(piece)
+            in_total += len(piece)
+            in_marks.append((time.monotonic(), in_total))
+            cond.notify_all()
+        parser.feed(piece)                                            # observe outside the lock
 
 
 def fetcher():
@@ -615,7 +624,9 @@ def fetcher():
             log(f"upstream error {type(e).__name__}: {e}; retry in {backoff}s")
         if stop.is_set():
             break
-        held = release_held_replay()
+        with cond:
+            flushing = flush_pending
+        held = b"" if flushing else release_held_replay()
         if held:
             ingest(held)
         if arrived_total == 0:

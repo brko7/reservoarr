@@ -130,13 +130,47 @@ def test_a_first_pcr_beyond_the_hold_limit_is_not_taken(resv, gate, tmp_path):
     assert "no PCR within the hold limit" in (tmp_path / "delaybuf.log").read_text()
 
 
-def test_a_replay_larger_than_the_hold_cap_passes_everything(resv, gate, tmp_path):
+def test_a_replay_that_does_not_fit_in_the_reservoir_passes_everything(resv, gate, tmp_path):
     arm, run = gate
     arm()
-    resv.REPLAY_HOLD_MAX_BYTES = 20_000
+    resv.MAX_BYTES = 20_000
     data = stream(101.0, 120.0)
     assert run(data) == data
-    assert "hold cap" in (tmp_path / "delaybuf.log").read_text()
+    assert "does not fit in the reservoir" in (tmp_path / "delaybuf.log").read_text()
+
+
+def test_a_step_of_exactly_ten_seconds_is_still_a_replay(resv, gate, tmp_path):
+    arm, run = gate
+    arm()
+    data = stream(100.0, 100.5) + stream(110.5, 115.0)
+    assert run(data) == data[offset_of_pcr(data, 110.5):]
+    assert "skipped 10.0s" in (tmp_path / "delaybuf.log").read_text()
+
+
+def test_a_reservoir_running_low_releases_the_replay(resv, gate, tmp_path, monkeypatch):
+    arm, run = gate
+    arm()
+    monkeypatch.setattr(resv.parser, "content_rate", lambda: 500_000.0)
+    resv.buf_bytes = 500_000
+    data = stream(101.0, 120.0)
+    assert run(data) == data
+    assert "reservoir running low" in (tmp_path / "delaybuf.log").read_text()
+
+
+def test_a_full_reservoir_keeps_holding(resv, gate, monkeypatch):
+    arm, run = gate
+    arm()
+    monkeypatch.setattr(resv.parser, "content_rate", lambda: 500_000.0)
+    resv.buf_bytes = 500_000 * 12
+    data = stream(101.0, 120.0)
+    assert run(data) == data[offset_of_pcr(data, 110.1):]
+
+
+def test_ingest_queues_a_large_release_in_chunks(resv):
+    blob = bytes(resv.CHUNK * 3 + 10)
+    resv.ingest(blob)
+    assert [len(piece) for piece in resv.buf] == [resv.CHUNK] * 3 + [10]
+    assert resv.buf_bytes == resv.in_total == len(blob)
 
 
 def test_whole_packets_come_out_even_from_odd_chunks(gate):
@@ -225,6 +259,38 @@ def test_a_connection_that_ends_before_the_seam_gives_back_what_was_held(
     connect_once(Replayed(replay))
     assert resv.in_total == len(replay)
     assert "connection ended before the seam" in (tmp_path / "delaybuf.log").read_text()
+
+
+class Flushed(Replayed):
+    def __init__(self, resv, data):
+        super().__init__(data)
+        self.resv = resv
+
+    def read(self, size):
+        chunk = super().read(size)
+        if not chunk:
+            self.resv.flush_pending = True
+        return chunk
+
+
+def test_a_held_replay_is_dropped_when_the_reservoir_is_being_flushed(resv, monkeypatch, tmp_path):
+    resv.REPLAY_SKIP = True
+    resv.GIVEUP_TRIES = 0
+    resv.parser.pcr_pid = PID
+    resv.parser.last_pcr = SEAM
+    answers = [Flushed(resv, stream(101.0, 109.0))]
+
+    def urlopen(*_a, **_k):
+        if answers:
+            return answers.pop()
+        resv.stop.set()
+        raise OSError("stop")
+
+    monkeypatch.setattr(resv.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(resv.time, "sleep", lambda _s: None)
+    resv.fetcher()
+    assert resv.in_total == 0
+    assert "connection ended before the seam" not in (tmp_path / "delaybuf.log").read_text()
 
 
 class Ticks:
