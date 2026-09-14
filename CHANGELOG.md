@@ -13,6 +13,8 @@ New default-off tunable ([@PilaScat](https://github.com/PilaScat)). **No change 
   | `RESV_TS_CHANNEL` unset | −22.9s | −22.8s |
   | `RESV_TS_CHANNEL=9` | +3.4s | +3.3s |
 
+- On the production profile (Dispatcharr 0.31.0, `RESV_TS_CHANNEL={channelId}`), `ffprobe` on the channel's Dispatcharr output across a failover to the next stream, a switch to the fallback slate and the switch back: +2.8s, +3.5s and +4.6s, no step backwards; across a return from the slate when a provider connection freed up: +4.0s. Three Jellyfin 12.0.0 transcodes on a channel that started on the slate and went back to its stream 30s later: no `Non-monotonic DTS`, the output kept advancing through the return, and none of the three viewers stalled.
+
 - Not `-copyts` (invariant #5): ffmpeg still rebases the input, and the offset moves every output stream by the same amount. Dispatcharr substitutes `{channelId}` anywhere in the profile parameters, e.g. `/usr/bin/env RESV_TS_CHANNEL={channelId} /data/reservoarr/reservoarr.py {streamUrl} {userAgent}`.
 
 - `docs/TUNABLES.md`, `docs/TELEMETRY.md` (the `ts timeline:` line) and `docs/INVARIANTS.md` (#2, #5) updated. New tests: 15 in `tests/unit/test_ts_timeline.py` (opt-in, command, channel id sanitising, projection, stale and corrupt state, PES PTS parsing, 33-bit wrap, the later writer winning, the relay), and 2 e2e in `tests/e2e/test_ts_timeline.py` that run two processes back to back with and without the tunable.
