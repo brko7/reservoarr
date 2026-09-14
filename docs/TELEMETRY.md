@@ -13,7 +13,7 @@
 | `cushion=Ns(pcr)` | Seconds of media buffered ahead of the player. `(pcr)` = measured off the PCR clock (good); `(byte)` = fallback while PCR is unlocked. |
 | `buf=…MB` | Reservoir size in bytes. |
 | `out=…Mbps` | Output byte rate to ffmpeg. |
-| `in=…Mbps` | Arrival byte rate from upstream. |
+| `in=…Mbps` | Byte rate ingested from upstream. It is also the pacing reference while PCR is unlocked, so a replay dropped by `RESV_REPLAY_SKIP` is not counted. |
 | `crate=…Mbps` | PCR-derived content rate (the pacing reference). |
 | `in_total=…MB` | Lifetime bytes ingested. Bytes dropped by `RESV_REPLAY_SKIP` are not counted. |
 | `reconnects=N` | Upstream reconnects this session. |
@@ -35,7 +35,7 @@ Same file, free-form lines:
 | `would-fire: TS corruption detected (...)` | #5 ingest-side detector, log-only (`RESV_TS_RECONNECT=0` — default). |
 | `pcr backward jump: -Xs (last=A cur=B)` | Upstream PCR went backward by more than 0.5s — usually a CDN serving overlapping content. Log-only signal; pacing unchanged. The corresponding telemetry-line counter is `pcr_back=N`. With `RESV_REPLAY_SKIP=1` a replay after a plain reconnect is dropped before the parser sees it, so it no longer shows up here. |
 | `replay after reconnect: skipped Xs (YMB) already delivered` | `RESV_REPLAY_SKIP=1`: the new connection started X seconds behind where the old one ended; those Y MB were dropped up to the last PCR before the seam, and the stream resumes on the first packet past it. |
-| `replay after reconnect: <reason>; passing through` | `RESV_REPLAY_SKIP=1`, but the seam could not be placed, so everything held is released as with `=0`. `<reason>` is one of `Ns back is beyond RESV_REPLAY_MAX_S`, `discontinuity flag`, `PCR not advancing through the replay`, `lost TS sync`, `no TS sync within the hold limit`, `no PCR within the hold limit`. A connection that lands ahead of the seam passes through without a line. |
+| `replay after reconnect: <reason>; passing through` | `RESV_REPLAY_SKIP=1`, but the seam could not be placed, so everything held since the reconnect is released, as with `=0`. `<reason>` is one of `Ns back is beyond RESV_REPLAY_MAX_S`, `discontinuity flag`, `PCR not advancing through the replay`, `lost TS sync`, `no TS sync within the hold limit`, `no PCR within the hold limit`, `replay longer than the hold cap`, `connection ended before the seam`. A connection that lands ahead of the seam passes through without a line. |
 | `flushed reservoir after corrupt-loop reconnect` | Confirms the buffer was emptied (poisoned content discarded). Emitted after any flush-requesting reconnect — the corrupt-loop detector or an armed #5 firing. |
 | `ffmpeg: <line>` | ffmpeg's stderr, relayed line-by-line (this is what the `grep -v "ffmpeg:"` recipes strip). |
 | `stream consumer gone (<Type>); shutting down` | Dispatcharr closed our stdout (viewer stopped the channel); clean exit follows. |
