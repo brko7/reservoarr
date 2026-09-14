@@ -96,6 +96,7 @@ def run_pipeline(
     eof_at: float | None = None,
     corrupt_from: float | None = None,
     corrupt_rate: int = 5,
+    replay_skip: bool = False,
 ) -> Run:
     """Run cdn_sim + reservoarr.py for duration_s seconds; return collected
     artifacts. Caller asserts on Run.stats_lines() / Run.log_text() / out_ts.
@@ -128,6 +129,8 @@ def run_pipeline(
     for k in [k for k in env if k.startswith("RESV_") and k != "RESV_FFMPEG_BIN"]:
         env.pop(k)
     env["RESV_LOG_DIR"] = str(log_dir)
+    if replay_skip:
+        env["RESV_REPLAY_SKIP"] = "1"
     # Use the ffmpeg path the test runner picked (mac vs linux differ).
     if "RESV_FFMPEG_BIN" not in env:
         ffmpeg = shutil.which("ffmpeg")

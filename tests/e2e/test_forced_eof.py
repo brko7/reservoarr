@@ -34,3 +34,26 @@ def test_eof_clean_reconnect(tmp_path, synth_ts):
     assert stats[-1]["reconnects"] >= 1, (
         f"expected reconnect after forced EOF; final stats: {stats[-1]['raw']}"
     )
+
+
+@pytest.mark.e2e
+def test_eof_replay_is_skipped_with_replay_skip(tmp_path, synth_ts):
+    run = run_pipeline(
+        tmp_path, synth_ts, rate_bps=300_010, duration_s=75, eof_at=40.0,
+        replay_skip=True,
+    )
+    log = run.log_text()
+    assert "replay after reconnect: skipped" in log, (
+        f"cdn_sim resends its front after the EOF; the gate should drop it:\n{log}"
+    )
+    assert "timestamp discontinuity" not in log, (
+        f"the seam reached ffmpeg with a backward jump:\n{log}"
+    )
+
+    stats = run.stats_lines()
+    assert stats, "no telemetry"
+    assert stats[-1]["reconnects"] >= 1, stats[-1]["raw"]
+    cushions = [s["cushion"] for s in stats]
+    assert max(cushions[1:]) <= cushions[0] + 5, (
+        f"the replay was banked as cushion (without the gate ~20s -> ~42s): {cushions}"
+    )
