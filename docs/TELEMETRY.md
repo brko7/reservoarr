@@ -15,7 +15,7 @@
 | `out=…Mbps` | Output byte rate to ffmpeg. |
 | `in=…Mbps` | Arrival byte rate from upstream. |
 | `crate=…Mbps` | PCR-derived content rate (the pacing reference). |
-| `in_total=…MB` | Lifetime bytes ingested. |
+| `in_total=…MB` | Lifetime bytes ingested. Bytes dropped by `RESV_REPLAY_SKIP` are not counted. |
 | `reconnects=N` | Upstream reconnects this session. |
 | `ccerr/pcrrej/disc/sync` | TS continuity-counter errors / rejected PCR samples (garbage timestamps) / spec-legal discontinuities / sync losses. Healthy = flat zero. |
 | `pcr_back=N` | Backward PCR jumps > 0.5s (CDN overlap-replay signal — provider re-served N seconds of content). Each event also emits a `pcr backward jump: -Xs (last=… cur=…)` log line. Log-only; pacing is unchanged. Healthy = flat zero. |
@@ -29,11 +29,13 @@ Same file, free-form lines:
 | `upstream connected edge=<host>` | Each successful upstream HTTP connect. Includes the CDN edge host so you can correlate problems with a specific edge. |
 | `upstream EOF` | Upstream closed the connection cleanly. |
 | `upstream error <type>: <msg>; retry in Ns` | Upstream read/connect failed; exponential backoff active. |
-| `upstream stalled (no data Ns) - reconnecting, buffer kept` | #4 watchdog: ingest hasn't advanced for `RESV_STALL_S`; reconnect WITHOUT flushing. |
+| `upstream stalled (no data Ns) - reconnecting, buffer kept` | #4 watchdog: no byte has arrived from upstream for `RESV_STALL_S`; reconnect WITHOUT flushing. A replay being dropped by `RESV_REPLAY_SKIP` counts as arriving, so a slow replay never trips it. |
 | `corrupt-loop detected in stream (dts=N x3) - forcing upstream reconnect + buffer flush` | ffmpeg-stderr-side detector: same `dts` reported 3× in 120s. |
 | `TS corruption detected (...)` | #5 ingest-side detector, ARMED (`RESV_TS_RECONNECT=1`). |
 | `would-fire: TS corruption detected (...)` | #5 ingest-side detector, log-only (`RESV_TS_RECONNECT=0` — default). |
-| `pcr backward jump: -Xs (last=A cur=B)` | Upstream PCR went backward by more than 0.5s — usually a CDN serving overlapping content. Log-only signal; pacing/dedup unchanged. The corresponding telemetry-line counter is `pcr_back=N`. |
+| `pcr backward jump: -Xs (last=A cur=B)` | Upstream PCR went backward by more than 0.5s — usually a CDN serving overlapping content. Log-only signal; pacing unchanged. The corresponding telemetry-line counter is `pcr_back=N`. With `RESV_REPLAY_SKIP=1` a replay after a plain reconnect is dropped before the parser sees it, so it no longer shows up here. |
+| `replay after reconnect: skipped Xs (YMB) already delivered` | `RESV_REPLAY_SKIP=1`: the new connection started X seconds behind where the old one ended; those Y MB were dropped up to the last PCR before the seam, and the stream resumes on the first packet past it. |
+| `replay after reconnect: <reason>; passing through` | `RESV_REPLAY_SKIP=1`, but the seam could not be placed, so everything held is released as with `=0`. `<reason>` is one of `Ns back is beyond RESV_REPLAY_MAX_S`, `discontinuity flag`, `PCR not advancing through the replay`, `lost TS sync`, `no TS sync within the hold limit`, `no PCR within the hold limit`. A connection that lands ahead of the seam passes through without a line. |
 | `flushed reservoir after corrupt-loop reconnect` | Confirms the buffer was emptied (poisoned content discarded). Emitted after any flush-requesting reconnect — the corrupt-loop detector or an armed #5 firing. |
 | `ffmpeg: <line>` | ffmpeg's stderr, relayed line-by-line (this is what the `grep -v "ffmpeg:"` recipes strip). |
 | `stream consumer gone (<Type>); shutting down` | Dispatcharr closed our stdout (viewer stopped the channel); clean exit follows. |

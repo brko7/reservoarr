@@ -25,7 +25,7 @@ Each was considered, evidence-evaluated, and rejected. Don't reopen without new 
 
 | Rejected | Why |
 |---|---|
-| EOF-reconnect overlap-replay dedup | The controller self-drains the 1.15× post-reconnect bloat in ~2 min; the event is rare; a PCR-splice dedup risks dropping live content on a garbage seam. Add a log marker + gather evidence first. |
+| EOF-reconnect overlap-replay dedup — **reopened in 6.3.5 as opt-in `RESV_REPLAY_SKIP`, default `0`** | The controller self-drains the 1.15× post-reconnect bloat in ~2 min; the event is rare; a PCR-splice dedup risks dropping live content on a garbage seam. Add a log marker + gather evidence first. **Reopened on that evidence ([#40](https://github.com/brko7/reservoarr/issues/40)):** on edges that end connections with a plain EOF every few minutes, each reconnect resent 9–25s that viewers saw twice, and the cushion grew by the replay every time (19 → 42s on `cdn_sim --front 25 --eof-at 40`) instead of self-draining. The gate only drops what sits before the last PCR taken ahead of the seam, and every ambiguous seam passes through as before; `=0` is byte-for-byte the old path. |
 | `ffmpeg -readrate` | Timestamp-driven → same garbage-DTS stall as `-re`. |
 | Output null-stuffing | Breaks Emby / Jellyfin per the Dispatcharr v0.26.0 changelog. |
 | asyncio rewrite | No benefit at this bitrate; loses the simple stdlib-thread model. |
