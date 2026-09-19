@@ -2,6 +2,14 @@
 
 All notable changes to `reservoarr.py`. Each version's invariants are earned by a real production failure — read this before changing the script.
 
+## [6.3.7] — 2026-09-19
+
+Fix ([@PilaScat](https://github.com/PilaScat)). **No change for existing installs** — with `RESV_GIVEUP_TRIES=0`, the default, the fetcher never gives up and the prefill runs exactly as in 6.3.6.
+
+- **A process whose fetcher gave up now exits at once instead of sitting out the prefill.** `main()` waited for `RESV_PREFILL_BYTES` or `RESV_PREFILL_MAX_S` (3s) and never looked at `upstream_eof`, so after `giving up: no data after N upstream attempts` the process still waited out the 3s, started ffmpeg on an empty pipe and only then ended. Dispatcharr counts a failed attempt when the process ends, so on a stream the edge refuses each of its three attempts paid 3s of prefill on top of the refusals. Measured on the production profile (Dispatcharr 0.31.0, first stream refused with `404`, the fallback second): with `RESV_GIVEUP_TRIES=1` the fetcher gave up 0.14s after each tune, `prefill done: 0.0MB in 3.0s` followed, and the stream switch landed 10.5s after the first attempt; with `RESV_GIVEUP_TRIES=3` (three refusals per process, 1s and 2s of backoff between them) it had landed at 14.5s, the client had picture at 15.6s, and a viewer on Jellyfin who retried within that time never saw the channel start (19 September 2026, a DAZN feed whose FHD edge answered `403` 37 times in three hours while its HD played). Now the prefill wait also ends when the fetcher has stopped, and a process that stopped before any byte arrived logs `no data before the fetcher gave up (Ns); exiting without ffmpeg` and returns without starting ffmpeg. Same bench, patched: the switch at **1.5s** after the first attempt, ~0.5s per attempt, first byte at the client at 3.9s (1.8s of it the fallback's own prefill).
+
+- `docs/TELEMETRY.md` documents the new line; `docs/TUNABLES.md` says what a refused attempt costs now. Two new tests in `tests/unit/test_giveup.py` run the real `main()` with a scripted fetcher: one that gives up (main returns within the second, ffmpeg is never started) and one that delivers (the prefill releases to ffmpeg as before).
+
 ## [6.3.6] — 2026-09-14
 
 New default-off tunable ([@PilaScat](https://github.com/PilaScat)). **No change for existing installs** — with `RESV_TS_CHANNEL` unset the ffmpeg command and the output path are exactly those of 6.3.5.

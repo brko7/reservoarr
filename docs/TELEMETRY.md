@@ -42,6 +42,7 @@ Same file, free-form lines:
 | `ffmpeg: <line>` | ffmpeg's stderr, relayed line-by-line (this is what the `grep -v "ffmpeg:"` recipes strip). |
 | `stream consumer gone (<Type>); shutting down` | Dispatcharr closed our stdout (viewer stopped the channel); clean exit follows. |
 | `prefill done: NMB in Ns, releasing stream to ffmpeg` | Once-per-stream startup line. |
+| `no data before the fetcher gave up (Ns); exiting without ffmpeg` | `RESV_GIVEUP_TRIES` fired before any byte arrived: the process ends here, without the prefill wait and without ffmpeg, so Dispatcharr counts the failed attempt at once. |
 | `stream wrapper exit (ffmpeg rc=N)` | Final line on shutdown. |
 
 ## What healthy looks like

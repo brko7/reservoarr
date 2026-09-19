@@ -807,8 +807,12 @@ def main():
 
     t0 = time.monotonic()
     with cond:
-        while buf_bytes < PREFILL_BYTES and time.monotonic() - t0 < PREFILL_MAX_S and not stop.is_set():
+        while (buf_bytes < PREFILL_BYTES and not upstream_eof
+               and time.monotonic() - t0 < PREFILL_MAX_S and not stop.is_set()):
             cond.wait(0.5)
+    if upstream_eof and not buf_bytes:
+        log(f"no data before the fetcher gave up ({time.monotonic() - t0:.1f}s); exiting without ffmpeg")
+        return
     log(f"prefill done: {buf_bytes / 1e6:.1f}MB in {time.monotonic() - t0:.1f}s, releasing stream to ffmpeg")
 
     timeline = Timeline(timeline_path(), time.time()) if TS_CHANNEL else None

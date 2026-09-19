@@ -84,3 +84,48 @@ def test_never_gives_up_once_data_has_flowed(resv, run, capsys):
     assert tries == 8
     assert resv.in_total == len(NULL_PACKET) * 4
     assert "giving up" not in capsys.readouterr().err
+
+
+class FfmpegStarted(Exception):
+    """Raised by the Popen stand-in: main() got past the prefill."""
+
+
+@pytest.fixture
+def prefill(resv, monkeypatch):
+    """Run the real main() up to the prefill with a scripted fetcher in place of
+    the real one. Returns the seconds main() waited; `FfmpegStarted` means it
+    went on to start ffmpeg."""
+    def go(fetcher):
+        resv.PREFILL_MAX_S = 5.0
+
+        def popen(*_args, **_kwargs):
+            raise FfmpegStarted
+
+        monkeypatch.setattr(resv, "fetcher", fetcher)
+        monkeypatch.setattr(resv.subprocess, "Popen", popen)
+        t0 = resv.time.monotonic()
+        resv.main()
+        return resv.time.monotonic() - t0
+
+    return go
+
+
+def test_a_fetcher_that_gives_up_ends_the_prefill_at_once(resv, prefill, capsys):
+    def gives_up():
+        resv.upstream_eof = True
+        with resv.cond:
+            resv.cond.notify_all()
+
+    waited = prefill(gives_up)
+    assert waited < 1.0
+    err = capsys.readouterr().err
+    assert "no data before the fetcher gave up" in err
+    assert "prefill done" not in err
+
+
+def test_data_still_releases_the_prefill_to_ffmpeg(resv, prefill, capsys):
+    resv.PREFILL_BYTES = len(NULL_PACKET)
+
+    with pytest.raises(FfmpegStarted):
+        prefill(lambda: resv.ingest(NULL_PACKET))
+    assert "prefill done" in capsys.readouterr().err
