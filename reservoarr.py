@@ -69,6 +69,7 @@ SYNC_ERR_PER_WIN = int(os.getenv("RESV_SYNC_ERR_PER_WIN", "2"))       # sync los
 TS_SUSTAIN_WINS = int(os.getenv("RESV_TS_SUSTAIN_WINS", "2"))         # consecutive flagged windows before acting
 STALL_S = float(os.getenv("RESV_STALL_S", "25"))                      # no-ingest watchdog (#4); >CDN burst-gap, <urlopen 30s; 0=off
 GIVEUP_TRIES = int(os.getenv("RESV_GIVEUP_TRIES", "0"))               # exit after N no-data upstream tries so Dispatcharr fails over; 0=retry forever
+REJECT_MP4 = os.getenv("RESV_REJECT_MP4", "0") == "1"
 REPLAY_SKIP = os.getenv("RESV_REPLAY_SKIP", "0") == "1"
 REPLAY_MAX_S = float(os.getenv("RESV_REPLAY_MAX_S", "60"))
 REPLAY_HOLD_BYTES = 1024 * 1024
@@ -688,6 +689,12 @@ def ingest(d):
         parser.feed(piece)                                            # observe outside the lock
 
 
+def sends_mp4(response, head):
+    headers = getattr(response, "headers", None)
+    kind = headers.get_content_type() if headers is not None else ""
+    return kind == "video/mp4" or head[4:8] == b"ftyp"
+
+
 def fetcher():
     global buf_bytes, arrived_total, reconnects, upstream_eof, cur_response, flush_pending
     backoff = 1
@@ -717,6 +724,7 @@ def fetcher():
             if not first:
                 reconnects += 1
             first = False
+            checked = not REJECT_MP4
             while not stop.is_set():
                 if force_reconnect.is_set():
                     break                                            # corrupt-loop/stall: break clean (flush+reconnect)
@@ -729,6 +737,11 @@ def fetcher():
                 if not d:
                     log("upstream EOF")
                     break
+                if not checked:
+                    checked = True
+                    if sends_mp4(r, d):
+                        log("upstream sent an MP4 file, not a live TS; counted as an attempt without data")
+                        break
                 backoff = 1                                           # reset only once data flows: an empty
                 #                                                       connect must keep backing off, not
                 #                                                       hammer the provider at 1/s forever

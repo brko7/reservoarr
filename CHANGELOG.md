@@ -2,6 +2,16 @@
 
 All notable changes to `reservoarr.py`. Each version's invariants are earned by a real production failure — read this before changing the script.
 
+## [6.3.8] — 2026-10-07
+
+New default-off tunable ([@PilaScat](https://github.com/PilaScat)). **No change for existing installs** — with `RESV_REJECT_MP4` unset every answer is fed to ffmpeg exactly as in 6.3.7.
+
+- **New `RESV_REJECT_MP4=1` tunable: an edge that answers with an MP4 file instead of a live TS counts as an attempt without data.** A provider with a channel off the air answers `200 video/mp4` with a finished file, its "courtesy" clip, rather than refusing. Bytes arrive, so `RESV_GIVEUP_TRIES` never fires: ffmpeg's `mpegts` input reads the file, logs `[in#0/mov,mp4,…] Error during demuxing: Invalid data found when processing input`, the stream ends and Dispatcharr retries the same URL. Measured on the production profile (Dispatcharr 0.31.0, `RESV_GIVEUP_TRIES=1`, 6 October 2026, a sports feed off the air as first stream): each of Dispatcharr's three attempts took 9–10s (connect, `upstream EOF`, reconnect, EOF, then the ffmpeg error), and the switch to the second stream landed **30.2s** after the tune — past the 30s tune timeout of the Jellyfin client, which gave up 0.3s before the channel would have started. With the tunable set, the first chunk of every connection is checked once: `Content-Type: video/mp4`, or an `ftyp` box at offset 4, means an MP4 file. The fetcher logs `upstream sent an MP4 file, not a live TS; counted as an attempt without data`, leaves the bytes out of the reservoir and of `arrived_total`, and with `RESV_GIVEUP_TRIES` set gives up as it does on a `403`. On a bench that serves the way that edge did (an 8 MB MP4 with its index at the end, `Content-Type: video/mp4`, ~4 Mbps, connection closed after 3s; `RESV_GIVEUP_TRIES=1`), two runs each: 6.3.7 was still running after 60s, the patched script exited in 0.23s and 0.24s.
+
+- Only the first chunk of a connection is checked, so a live stream is never cut mid-session. Once data has flowed in the process, an MP4 answer on a reconnect is dropped and retried with the usual backoff instead of being fed to ffmpeg.
+
+- `docs/TUNABLES.md` and `docs/TELEMETRY.md` updated. Four new tests in `tests/unit/test_giveup.py`: an MP4 by `Content-Type` and one by its `ftyp` box both give up after one attempt with nothing ingested; a live TS with the check on is taken as before; an MP4 with the check off is ingested as in 6.3.7.
+
 ## [6.3.7] — 2026-09-19
 
 Fix ([@PilaScat](https://github.com/PilaScat)). **No change for existing installs** — with `RESV_GIVEUP_TRIES=0`, the default, the fetcher never gives up and the prefill runs exactly as in 6.3.6.

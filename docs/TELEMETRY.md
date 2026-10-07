@@ -43,6 +43,7 @@ Same file, free-form lines:
 | `stream consumer gone (<Type>); shutting down` | Dispatcharr closed our stdout (viewer stopped the channel); clean exit follows. |
 | `prefill done: NMB in Ns, releasing stream to ffmpeg` | Once-per-stream startup line. |
 | `no data before the fetcher gave up (Ns); exiting without ffmpeg` | `RESV_GIVEUP_TRIES` fired before any byte arrived: the process ends here, without the prefill wait and without ffmpeg, so Dispatcharr counts the failed attempt at once. |
+| `upstream sent an MP4 file, not a live TS; counted as an attempt without data` | `RESV_REJECT_MP4=1` and the edge answered with an MP4 file: nothing was ingested from this connection. With `RESV_GIVEUP_TRIES` set, `giving up` follows. |
 | `stream wrapper exit (ffmpeg rc=N)` | Final line on shutdown. |
 
 ## What healthy looks like

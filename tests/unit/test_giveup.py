@@ -4,6 +4,7 @@ synchronously here: time.sleep is replaced by a recorder that can also stop
 the loop, and urlopen by a scripted sequence of responses."""
 from __future__ import annotations
 
+import email.message
 import io
 import urllib.error
 
@@ -76,6 +77,50 @@ def test_a_connect_that_closes_before_any_byte_counts_as_a_try(resv, run):
     tries, _ = run([Response([])], giveup=2)
     assert tries == 2
     assert resv.in_total == 0
+
+
+MP4_HEAD = b"\x00\x00\x00 ftypisom\x00\x00\x02\x00isomiso2avc1mp41"
+
+
+class Served(Response):
+    def __init__(self, chunks, content_type):
+        super().__init__(chunks)
+        self.headers = email.message.Message()
+        self.headers["Content-Type"] = content_type
+
+
+def test_an_mp4_courtesy_file_counts_as_an_attempt_without_data(resv, run, capsys):
+    resv.REJECT_MP4 = True
+    tries, sleeps = run([Served([MP4_HEAD * 64], "video/mp4")], giveup=1)
+    assert tries == 1
+    assert sleeps == []
+    assert resv.in_total == 0
+    err = capsys.readouterr().err
+    assert "upstream sent an MP4 file, not a live TS" in err
+    assert "giving up: no data after 1 upstream attempts" in err
+
+
+def test_an_mp4_is_recognised_by_its_ftyp_box_without_a_content_type(resv, run):
+    resv.REJECT_MP4 = True
+    tries, _ = run([Response([MP4_HEAD * 64])], giveup=1)
+    assert tries == 1
+    assert resv.in_total == 0
+
+
+def test_a_live_ts_is_taken_as_before_with_the_check_on(resv, run, capsys):
+    resv.REJECT_MP4 = True
+    answers = [Served([NULL_PACKET * 4], "video/mp2t"), forbidden]
+    tries, _ = run(answers, giveup=1, stop_after=4)
+    assert tries == 4
+    assert resv.in_total == len(NULL_PACKET) * 4
+    assert "MP4" not in capsys.readouterr().err
+
+
+def test_an_mp4_is_ingested_as_before_when_the_check_is_off(resv, run):
+    resv.REJECT_MP4 = False
+    tries, _ = run([Served([MP4_HEAD * 64], "video/mp4"), forbidden], giveup=1, stop_after=3)
+    assert tries == 3
+    assert resv.in_total == len(MP4_HEAD) * 64
 
 
 def test_never_gives_up_once_data_has_flowed(resv, run, capsys):
