@@ -689,10 +689,8 @@ def ingest(d):
         parser.feed(piece)                                            # observe outside the lock
 
 
-def sends_mp4(response, head):
-    headers = getattr(response, "headers", None)
-    kind = headers.get_content_type() if headers is not None else ""
-    return kind == "video/mp4" or head[4:8] == b"ftyp"
+def is_mp4(head):
+    return head[:1] != b"\x47" and head[4:8] == b"ftyp"
 
 
 def fetcher():
@@ -739,8 +737,9 @@ def fetcher():
                     break
                 if not checked:
                     checked = True
-                    if sends_mp4(r, d):
+                    if is_mp4(d):
                         log("upstream sent an MP4 file, not a live TS; counted as an attempt without data")
+                        r.close()
                         break
                 backoff = 1                                           # reset only once data flows: an empty
                 #                                                       connect must keep backing off, not

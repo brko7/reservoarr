@@ -23,6 +23,9 @@ class Response:
     def geturl(self):
         return "http://edge.test/live/stream.ts"
 
+    def close(self):
+        self.closed = True
+
 
 def forbidden(*_args, **_kwargs):
     raise urllib.error.HTTPError(
@@ -91,10 +94,12 @@ class Served(Response):
 
 def test_an_mp4_courtesy_file_counts_as_an_attempt_without_data(resv, run, capsys):
     resv.REJECT_MP4 = True
-    tries, sleeps = run([Served([MP4_HEAD * 64], "video/mp4")], giveup=1)
+    courtesy = Served([MP4_HEAD * 64], "video/mp4")
+    tries, sleeps = run([courtesy], giveup=1)
     assert tries == 1
     assert sleeps == []
     assert resv.in_total == 0
+    assert courtesy.closed is True
     err = capsys.readouterr().err
     assert "upstream sent an MP4 file, not a live TS" in err
     assert "giving up: no data after 1 upstream attempts" in err
@@ -107,9 +112,9 @@ def test_an_mp4_is_recognised_by_its_ftyp_box_without_a_content_type(resv, run):
     assert resv.in_total == 0
 
 
-def test_a_live_ts_is_taken_as_before_with_the_check_on(resv, run, capsys):
+def test_a_live_ts_labelled_video_mp4_is_taken_as_before(resv, run, capsys):
     resv.REJECT_MP4 = True
-    answers = [Served([NULL_PACKET * 4], "video/mp2t"), forbidden]
+    answers = [Served([NULL_PACKET * 4], "video/mp4"), forbidden]
     tries, _ = run(answers, giveup=1, stop_after=4)
     assert tries == 4
     assert resv.in_total == len(NULL_PACKET) * 4
