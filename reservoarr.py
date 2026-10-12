@@ -134,7 +134,10 @@ flush_pending = False                                                 # sticky f
 # a future provider URL shape can't leak an embedded key into the logs.
 STREAM_ID = URL.split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1][:48] or "stream"
 LOG_DIR = os.getenv("RESV_LOG_DIR", "/data/scripts/logs")              # Dispatcharr AIO container default
-os.makedirs(LOG_DIR, exist_ok=True)
+try:
+    os.makedirs(LOG_DIR, exist_ok=True)
+except OSError:
+    pass                                                              # unwritable: log() already drops file writes, stderr still works
 LOG_FILE = os.path.join(LOG_DIR, "delaybuf.log")
 LOG_ROTATE_BYTES = 10 * 1024 * 1024
 _log_writes = 0
@@ -689,8 +692,39 @@ def ingest(d):
         parser.feed(piece)                                            # observe outside the lock
 
 
+BACKOFF_RESET_BYTES = 1024 * 1024                                      # a connection resets the reconnect backoff after this
+BACKOFF_RESET_S = 10.0                                                 # many bytes or this long, not on its first chunk
+
+
 def is_mp4(head):
     return head[:1] != b"\x47" and head[4:8] == b"ftyp"
+
+
+NON_TS_SIGNATURES = (
+    (b"#EXTM3U", "an HLS playlist"),
+    (b"<!doctype", "an HTML page"),
+    (b"<html", "an HTML page"),
+    (b"<?xml", "an XML document"),
+)
+
+
+def non_ts_kind(head):
+    """What a connection's first chunk is when it can never be a live TS, or
+    None. Matched on content, not Content-Type (CDNs label live TS as
+    video/mp4) and not on 'first byte != 0x47' (a TS may start mid-packet;
+    ts_sync resyncs). MP4 is opt-in via RESV_REJECT_MP4; the rest are always
+    rejected: ffmpeg's mpegts demuxer cannot play them, and the small body used
+    to look like data, which reset the backoff and kept RESV_GIVEUP_TRIES from
+    firing."""
+    if REJECT_MP4 and is_mp4(head):
+        return "an MP4 file"
+    if head[:1] == b"\x47":
+        return None
+    start = head[:16].lstrip(b"\xef\xbb\xbf \t\r\n").lower()
+    for sig, kind in NON_TS_SIGNATURES:
+        if start.startswith(sig.lower()):
+            return kind
+    return None
 
 
 def fetcher():
@@ -722,7 +756,9 @@ def fetcher():
             if not first:
                 reconnects += 1
             first = False
-            checked = not REJECT_MP4
+            checked = False
+            conn_bytes = 0
+            conn_t0 = time.monotonic()
             while not stop.is_set():
                 if force_reconnect.is_set():
                     break                                            # corrupt-loop/stall: break clean (flush+reconnect)
@@ -737,13 +773,18 @@ def fetcher():
                     break
                 if not checked:
                     checked = True
-                    if is_mp4(d):
-                        log("upstream sent an MP4 file, not a live TS; counted as an attempt without data")
+                    kind = non_ts_kind(d)
+                    if kind:
+                        hint = (" (reservoarr needs a raw MPEG-TS URL, see README)"
+                                if kind == "an HLS playlist" else "")
+                        log(f"upstream sent {kind}, not a live TS; counted as an attempt without data{hint}")
                         r.close()
                         break
-                backoff = 1                                           # reset only once data flows: an empty
-                #                                                       connect must keep backing off, not
-                #                                                       hammer the provider at 1/s forever
+                conn_bytes += len(d)
+                if len(d) >= CHUNK or conn_bytes >= BACKOFF_RESET_BYTES or time.monotonic() - conn_t0 >= BACKOFF_RESET_S:
+                    backoff = 1                                       # reset only once a connection has carried real
+                    #                                                   data: an empty or tiny answer must keep
+                    #                                                   backing off, not hammer the provider at 1/s
                 arrived_total += len(d)
                 d = skip_replay(d)
                 if d:

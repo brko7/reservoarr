@@ -44,6 +44,7 @@ Same file, free-form lines:
 | `prefill done: NMB in Ns, releasing stream to ffmpeg` | Once-per-stream startup line. |
 | `no data before the fetcher gave up (Ns); exiting without ffmpeg` | `RESV_GIVEUP_TRIES` fired before any byte arrived: the process ends here, without the prefill wait and without ffmpeg, so Dispatcharr counts the failed attempt at once. |
 | `upstream sent an MP4 file, not a live TS; counted as an attempt without data` | `RESV_REJECT_MP4=1` and the edge answered with an MP4 file: nothing was ingested from this connection. With `RESV_GIVEUP_TRIES` set, `giving up` follows. |
+| `upstream sent an HLS playlist, not a live TS; counted as an attempt without data` (or `an HTML page` / `an XML document`) | Always on (6.3.9): the edge answered with something ffmpeg can never play as live TS — typically the stream URL is an `.m3u8` playlist or the edge returned an error page. Nothing was ingested; the backoff keeps growing. With `RESV_GIVEUP_TRIES` set, `giving up` follows. For an HLS playlist the line adds `(reservoarr needs a raw MPEG-TS URL, see README)`. |
 | `stream wrapper exit (ffmpeg rc=N)` | Final line on shutdown. |
 
 ## What healthy looks like

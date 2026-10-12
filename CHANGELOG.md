@@ -2,6 +2,18 @@
 
 All notable changes to `reservoarr.py`. Each version's invariants are earned by a real production failure — read this before changing the script.
 
+## [6.3.9] — 2026-10-12
+
+Three fixes. **No change for working installs** except the backoff reset below — a connection that carries a live TS is otherwise handled exactly as in 6.3.8.
+
+- **An HLS playlist, HTML page or XML document as upstream is now an attempt without data, not a reconnect loop.** The fetcher took any `200` for a live TS. A stream URL that really is an `index.m3u8` (or an edge answering with an error page) delivered a few hundred bytes; those counted as data, reset the reconnect backoff to 1s and made `arrived_total` non-zero, so `RESV_GIVEUP_TRIES` could never fire. The edge was hit about once a second (a provider with a 2-connection cap feels that), prefill showed `0.0MB`, ffmpeg got junk, and the player never started (discussion #24: `reconnects=26`, `buf=0.0MB`). Now the first chunk of every connection is matched against `#EXTM3U`, `<!DOCTYPE`, `<html` and `<?xml` (leading whitespace ignored, case-insensitive). On a hit the bytes are dropped, the connection closed, and the fetcher logs `upstream sent an HLS playlist, not a live TS; counted as an attempt without data (reservoarr needs a raw MPEG-TS URL, see README)` (or `an HTML page` / `an XML document`); with `RESV_GIVEUP_TRIES` set the process then gives up as on a `403`. Matched on content, not `Content-Type` (CDNs label live TS `video/mp4`) and not on a missing `0x47` (a live TS may start mid-packet). Unlike `RESV_REJECT_MP4`, this check is always on: these answers can never be played. `RESV_REJECT_MP4` stays opt-in.
+
+- **The reconnect backoff now resets only after a connection has carried real data** (one full 94 KB read chunk, 1 MB, or 10s connected), not on its first chunk. The old reset defeated its own comment ("an empty connect must keep backing off"): any short non-empty `200` reconnected every second. A healthy stream that reconnects after minutes of data is unaffected.
+
+- **An unwritable `RESV_LOG_DIR` no longer crashes the script at import.** `os.makedirs` was unguarded, so a read-only or missing mount ended the process with a traceback before the stream started, although the README promises "logs only to stderr". `log()` already dropped file writes on `OSError`; now the directory creation does too.
+
+- `docs/TUNABLES.md`, `docs/TELEMETRY.md` and the README troubleshooting section updated. New tests in `tests/unit/test_giveup.py` (playlist/HTML/XML bodies give up after one attempt with nothing ingested; backoff keeps doubling on a playlist and on a tiny live answer, resets after real data; a TS starting mid-packet is not mistaken for a page) and `tests/unit/test_log_rotation.py` (import survives an unwritable log dir).
+
 ## [6.3.8] — 2026-10-07
 
 New default-off tunable ([@PilaScat](https://github.com/PilaScat)). **No change for existing installs** — with `RESV_REJECT_MP4` unset every answer is fed to ffmpeg exactly as in 6.3.7.

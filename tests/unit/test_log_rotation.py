@@ -57,3 +57,12 @@ def test_no_rotation_below_threshold(resv):
     resv.log("check fires, no rotate", stderr=False)
     assert not Path(resv.LOG_FILE + ".1").exists()
     assert "small file" in Path(resv.LOG_FILE).read_text()
+
+
+def test_unwritable_log_dir_does_not_crash_import(tmp_path, capsys):
+    """README promises 'logs only to stderr' when RESV_LOG_DIR can't be created."""
+    blocker = tmp_path / "file"
+    blocker.write_text("x")
+    mod = _load(blocker / "logs")                 # makedirs -> NotADirectoryError
+    mod.log("still alive")
+    assert "still alive" in capsys.readouterr().err

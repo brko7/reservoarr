@@ -160,6 +160,10 @@ Plex's tuner times out after ~15s of input starvation. The prefill phase exists 
 2. **Do not** raise `RESV_PREFILL_MAX_S` past 5s — Plex's hard ceiling is ~15s and Dispatcharr's connection timeout sits around 10s.
 3. If your provider's first-bytes latency is consistently bad, this is a provider-side problem; no wrapper buffer can fix it.
 
+### "Stream never starts, `buf=0.0MB`, `reconnects` keeps climbing"
+
+Look for `upstream sent an HLS playlist, not a live TS` in `delaybuf.log` (6.3.9+; older versions just reconnect about once a second). The stream URL Dispatcharr hands reservoarr is an HLS playlist (`.m3u8`), and reservoarr needs a raw MPEG-TS URL. Use the provider's `.ts` / `/live/<user>/<pass>/<id>.ts` form for that stream, or give HLS-only streams a different stream profile (e.g. Dispatcharr's built-in ffmpeg profile). `an HTML page` / `an XML document` instead means the edge answered with an error page: check the URL and credentials.
+
 ### Telemetry file isn't appearing
 
 Check `RESV_LOG_DIR` on the container (defaults to `/data/scripts/logs/`). The script `os.makedirs`'s it at startup; if it can't (permission denied, read-only mount), the run continues but logs only to stderr (which Dispatcharr's transcode logger captures separately). Confirm the directory exists and is writable by the container's PUID.

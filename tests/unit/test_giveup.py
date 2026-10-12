@@ -179,3 +179,77 @@ def test_data_still_releases_the_prefill_to_ffmpeg(resv, prefill, capsys):
     with pytest.raises(FfmpegStarted):
         prefill(lambda: resv.ingest(NULL_PACKET))
     assert "prefill done" in capsys.readouterr().err
+
+
+HLS_BODY = b"#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:6\nseg1.ts\n"
+
+
+@pytest.mark.parametrize("body", [
+    HLS_BODY,
+    b"\n #EXTM3U\n",
+    b"\xef\xbb\xbf#EXTM3U\n",
+    b"<!DOCTYPE html><html><body>Not found</body></html>",
+    b"  <html><head></head></html>",
+    b'<?xml version="1.0"?><Error/>',
+])
+def test_a_playlist_or_page_counts_as_an_attempt_without_data(resv, run, capsys, body):
+    page = Response([body])
+    tries, sleeps = run([page], giveup=1)
+    assert tries == 1
+    assert resv.in_total == 0
+    assert page.closed is True
+    err = capsys.readouterr().err
+    assert "not a live TS; counted as an attempt without data" in err
+    assert "giving up: no data after 1 upstream attempts" in err
+
+
+def test_an_hls_playlist_log_line_points_to_the_readme(resv, run, capsys):
+    run([Response([HLS_BODY])], giveup=1)
+    err = capsys.readouterr().err
+    assert "upstream sent an HLS playlist, not a live TS" in err
+    assert "needs a raw MPEG-TS URL" in err
+
+
+def test_a_playlist_keeps_backing_off_instead_of_hammering_the_edge(resv, run):
+    tries, sleeps = run([lambda *a, **k: Response([HLS_BODY])], giveup=0, stop_after=6)
+    assert tries == 6
+    assert sleeps == [1, 2, 4, 8, 8, 8]
+    assert resv.in_total == 0
+
+
+def test_a_tiny_live_answer_no_longer_resets_the_backoff(resv, run):
+    answers = [lambda *a, **k: Response([NULL_PACKET * 4])]
+    tries, sleeps = run(answers, giveup=0, stop_after=5)
+    assert tries == 5
+    assert sleeps == [1, 2, 4, 8, 8]
+
+
+def test_a_connection_that_carried_real_data_resets_the_backoff(resv, run):
+    big = NULL_PACKET * (resv.BACKOFF_RESET_BYTES // len(NULL_PACKET) + 1)
+    answers = [forbidden, forbidden, lambda *a, **k: Response([big]), forbidden]
+    tries, sleeps = run(answers, giveup=0, stop_after=4)
+    assert tries == 4
+    assert sleeps == [1, 2, 1, 2]
+
+
+def test_ts_that_starts_mid_packet_is_not_mistaken_for_a_page(resv, run):
+    chunk = b"\n " + b"\xff" * 20 + NULL_PACKET * 3        # whitespace lead exercises the strip
+    tries, _ = run([Response([chunk]), forbidden], giveup=1, stop_after=3)
+    assert tries == 3
+    assert resv.in_total == len(chunk)
+
+
+def test_one_full_read_chunk_resets_the_backoff(resv, run):
+    full = NULL_PACKET * (resv.CHUNK // len(NULL_PACKET))
+    assert len(full) >= resv.CHUNK
+    answers = [forbidden, forbidden, lambda *a, **k: Response([full]), forbidden]
+    _, sleeps = run(answers, giveup=0, stop_after=4)
+    assert sleeps == [1, 2, 1, 2]
+
+
+def test_a_connection_open_for_10s_resets_the_backoff(resv, run, monkeypatch):
+    clock = iter([0.0, 11.0, 11.0, 11.0, 11.0, 11.0])
+    monkeypatch.setattr(resv.time, "monotonic", lambda: next(clock, 11.0))
+    answers = [forbidden, forbidden, lambda *a, **k: Response([NULL_PACKET * 4]), forbidden]
+    _, sleeps = run(answers, giveup=0, stop_after=4)
+    assert sleeps == [1, 2, 1, 2]
