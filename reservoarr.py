@@ -83,6 +83,10 @@ FFMPEG_BIN = os.getenv("RESV_FFMPEG_BIN", "/usr/local/bin/ffmpeg")    # Dispatch
 # default: turning it on hands Dispatcharr the signal it needs to fail a starving
 # feed over to the next stream, at the cost of a progress line every 0.5s.
 FFMPEG_STATS = os.getenv("RESV_FFMPEG_STATS", "0") == "1"
+# Three lowercase letters (ISO 639-2) or nothing: ffmpeg's mpegts muxer writes
+# any other value as no tag at all, and "FRA" is stored as typed.
+AUDIO_LANG = os.getenv("RESV_AUDIO_LANG", "").strip().lower()
+AUDIO_LANG_OK = re.fullmatch(r"[a-z]{3}", AUDIO_LANG) is not None
 # No `-fflags +nobuffer`: it costs the whole first GOP of video. The demuxer
 # hands packets on before it has the video's parameter sets, so ffmpeg emits
 # audio from the first sample and video only from the next IDR. On a channel
@@ -99,6 +103,7 @@ FFMPEG_CMD = [
     "-map", "0:v", "-map", "0:a:0",
     "-c:v", "copy", "-bsf:v", "dump_extra=freq=keyframe",
     "-c:a", "ac3", "-b:a", "192k", "-ac", "2",
+    *(["-metadata:s:a:0", f"language={AUDIO_LANG}"] if AUDIO_LANG_OK else []),
     "-f", "mpegts", "-muxdelay", "0", "-muxpreload", "0", "pipe:1",
 ]
 TS_CHANNEL = re.sub(r"[^A-Za-z0-9_-]", "", os.getenv("RESV_TS_CHANNEL", ""))[:64]
@@ -855,6 +860,8 @@ def next_slice():
 
 
 def main():
+    if AUDIO_LANG and not AUDIO_LANG_OK:
+        log(f"RESV_AUDIO_LANG={AUDIO_LANG!r} is not a 3-letter code (e.g. fra); ignored")
     t = threading.Thread(target=fetcher, daemon=True)
     t.start()
 

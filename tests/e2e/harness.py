@@ -99,6 +99,7 @@ def run_pipeline(
     replay_skip: bool = False,
     ts_channel: str | None = None,
     log_dir: Path | None = None,
+    extra_env: dict[str, str] | None = None,
 ) -> Run:
     """Run cdn_sim + reservoarr.py for duration_s seconds; return collected
     artifacts. Caller asserts on Run.stats_lines() / Run.log_text() / out_ts.
@@ -135,6 +136,7 @@ def run_pipeline(
         env["RESV_REPLAY_SKIP"] = "1"
     if ts_channel:
         env["RESV_TS_CHANNEL"] = ts_channel
+    env.update(extra_env or {})
     # Use the ffmpeg path the test runner picked (mac vs linux differ).
     if "RESV_FFMPEG_BIN" not in env:
         ffmpeg = shutil.which("ffmpeg")

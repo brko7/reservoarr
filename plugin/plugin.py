@@ -4,7 +4,9 @@ Installs `reservoarr.py` into /data/reservoarr/ on first load (and on upgrades),
 then exposes a "Generate Stream Profile" action that creates a StreamProfile
 row pointing at it. The script itself is stdlib-only Python and reads tuning
 from environment variables; this plugin intentionally does NOT expose those
-as plugin fields — set them on the container if you need to override defaults.
+as plugin fields. Container environment variables do not reach the script
+(Dispatcharr starts its workers through `su -`); they go in a stream profile
+with command `/usr/bin/env`.
 See https://github.com/brko7/reservoarr/blob/main/docs/TUNABLES.md.
 """
 from __future__ import annotations
@@ -22,7 +24,7 @@ from core.models import StreamProfile
 
 class Plugin:
     name = "reservoarr"
-    version = "6.3.9"
+    version = "6.3.10"
     description = "Delay-buffer stream profile that absorbs IPTV CDN gaps so Plex Live TV stops dying"
     author = "brko7"
     help_url = "https://github.com/brko7/reservoarr"
@@ -93,9 +95,13 @@ class Plugin:
                 "label": "Tuning",
                 "type": "info",
                 "description": "Defaults are production-validated and fit most providers. "
-                               "To override (cushion target, watchdog thresholds, log dir, "
-                               "TS-corruption detector arming, etc.), set RESV_* env vars on "
-                               "the Dispatcharr container — full reference at the GitHub link.",
+                               "To override (cushion target, watchdog thresholds, audio language, "
+                               "TS-corruption detector arming, etc.), create a separate stream "
+                               "profile with command /usr/bin/env and parameters "
+                               "'RESV_X=value /data/reservoarr/reservoarr.py {streamUrl} {userAgent}'. "
+                               "Variables set on the Dispatcharr container are NOT seen by the "
+                               "script. Generate Stream Profile resets any profile of its name, so don't "
+                               "edit that one. Full reference at the GitHub link.",
             },
         ]
 

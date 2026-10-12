@@ -40,7 +40,7 @@ If you didn't set it as default in step 3, assign it per-channel: Channels → E
 
 That's it. Now [tune a channel](#first-channel-tune) to confirm it's working.
 
-> Tuning (cushion size, watchdog thresholds, log directory, etc.) is via `RESV_*` environment variables on the Dispatcharr container — not plugin UI fields. Defaults match production-validated behaviour and fit most providers. See [docs/TUNABLES.md](docs/TUNABLES.md) before overriding. The one exception is `RESV_TS_CHANNEL`, which is per channel and goes in the profile's parameters, as explained there.
+> Tuning (cushion size, watchdog thresholds, log directory, audio language, etc.) uses `RESV_*` variables, but **not as container environment variables** — Dispatcharr starts its workers through `su -`, which clears them, so a variable set on the container (Docker, Unraid) is ignored. Put them in a stream profile: command `/usr/bin/env`, parameters `RESV_X=value /data/reservoarr/reservoarr.py {streamUrl} {userAgent}`. Create a separate profile for it; **Generate Stream Profile** resets the one it made. Defaults fit most providers, so override only with evidence. Full steps and the variable list: [docs/TUNABLES.md](docs/TUNABLES.md#where-settings-go).
 
 ### Option 2 — Vendored copy + manual Stream Profile
 
@@ -142,7 +142,7 @@ The cushion is your only protection against starvation gaps. If it's too small f
 CC (continuity counter) errors flag genuine TS-packet damage. Some sources have a low baseline (1–2 per stats window); a sustained burst (≥3/window for multiple consecutive windows) is real corruption.
 
 1. If `ccerr` ramps up *with* audio/video desync: corruption is hitting decoded content. Watch for `would-fire: TS corruption detected` lines — that's the ingest-side detector picking it up.
-2. **The `#5` detector ships in log-only mode by default** (`RESV_TS_RECONNECT=0`). To arm it: set `RESV_TS_RECONNECT=1` on the container. The script will then force a reconnect + buffer flush when corruption sustains; see CHANGELOG v6.1.0 for the arming-test recipe and the open question about source-wide vs. edge-specific corruption.
+2. **The `#5` detector ships in log-only mode by default** (`RESV_TS_RECONNECT=0`). To arm it: add `RESV_TS_RECONNECT=1` to the profile parameters (see [where settings go](docs/TUNABLES.md#where-settings-go); container variables are ignored). The script will then force a reconnect + buffer flush when corruption sustains; see CHANGELOG v6.1.0 for the arming-test recipe and the open question about source-wide vs. edge-specific corruption.
 
 ### "Audio and video drift out of sync"
 
@@ -166,13 +166,13 @@ Look for `upstream sent an HLS playlist, not a live TS` in `delaybuf.log` (6.3.9
 
 ### Telemetry file isn't appearing
 
-Check `RESV_LOG_DIR` on the container (defaults to `/data/scripts/logs/`). The script `os.makedirs`'s it at startup; if it can't (permission denied, read-only mount), the run continues but logs only to stderr (which Dispatcharr's transcode logger captures separately). Confirm the directory exists and is writable by the container's PUID.
+Check `RESV_LOG_DIR` (defaults to `/data/scripts/logs/`). The script `os.makedirs`'s it at startup; if it can't (permission denied, read-only mount), the run continues but logs only to stderr (which Dispatcharr's transcode logger captures separately). Confirm the directory exists and is writable by the container's PUID.
 
 ### Still stuck?
 
 Open a [Discussion](https://github.com/brko7/reservoarr/discussions) with:
 - `delaybuf.log` excerpt around the event (15 min before/after)
-- Your `RESV_*` env settings (or "defaults" if none)
+- Your profile's command and parameters, including any `RESV_*` settings (or "defaults" if none)
 - Whether restarting the channel resolved it
 
 ## How it works

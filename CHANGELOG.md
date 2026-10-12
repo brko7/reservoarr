@@ -2,6 +2,16 @@
 
 All notable changes to `reservoarr.py`. Each version's invariants are earned by a real production failure — read this before changing the script.
 
+## [6.3.10] — 2026-10-12
+
+New default-off tunable and a correction to where settings go. **No change for existing installs** — with `RESV_AUDIO_LANG` unset the ffmpeg command is byte-for-byte the one 6.3.9 ran.
+
+- **New `RESV_AUDIO_LANG` tunable (issue #50, discussion #48).** A 3-letter ISO 639-2 code (`fra`) adds `-metadata:s:a:0 language=fra` to the output, so players list the audio track by language instead of "Unknown". The value is trimmed and lowercased; anything that is not three letters (`fr`, `francais`) is logged once and ignored, because ffmpeg's mpegts muxer writes no tag for it. It replaces a language the provider already sends. Deliberately **not** added: a general extra-ffmpeg-args setting (a second `-bsf:v` silently replaces the first, which would drop `dump_extra=freq=keyframe`, invariant #4), an audio-track selector (a missing index makes ffmpeg exit at startup, with a trailing `?` it silently produces no audio; no one has needed another track yet), and `title=` (MPEG-TS has no field for it, the muxer drops it). Embedded captions cannot be removed from a copied video stream without stripping all SEI, which also removes the recovery-point data mid-stream tune-in relies on, so that stays unsupported.
+
+- **Docs correction: `RESV_*` variables set on the Dispatcharr container are not seen by the script.** The README, `docs/TUNABLES.md` and the plugin's tuning note said to set them on the container. Dispatcharr's `entrypoint.sh` starts its workers with `su - "$POSTGRES_USER" -c …`, which clears the environment, and re-exports only its own list of variables, so a Docker or Unraid variable never reaches reservoarr (discussion #46: the reporter was right). The documented way is a stream profile with command `/usr/bin/env` and parameters `RESV_X=value /data/reservoarr/reservoarr.py {streamUrl} {userAgent}`, as `RESV_TS_CHANNEL` already required. New "Where settings go" section in `docs/TUNABLES.md`; README, the plugin docstring and `tuning_note` point to it. It also says to make a separate profile, since **Generate Stream Profile** resets the command and parameters of a profile with the same name.
+
+- New tests: `tests/unit/test_audio_lang.py` (default command unchanged; valid and invalid codes; invariant tokens present with and without the tunable; the `-output_ts_offset` splice still lands before `pipe:1`) and `tests/e2e/test_audio_lang.py` (the tag reaches the output TS). `run_pipeline` gained an `extra_env` argument.
+
 ## [6.3.9] — 2026-10-12
 
 Three fixes. **No change for working installs** except the backoff reset below — a connection that carries a live TS is otherwise handled exactly as in 6.3.8.

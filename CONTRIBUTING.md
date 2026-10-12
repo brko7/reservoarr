@@ -68,7 +68,7 @@ A "real-data evidence" PR includes: the incident timestamp, the relevant `delayb
 
 1. The `delaybuf.log` lines around the event (15 minutes before/after).
 2. Whether ffmpeg's stderr also flagged corruption in the same window.
-3. Your `RESV_*` env settings.
+3. Your profile's command and parameters, including any `RESV_*` settings.
 4. Whether forcing a manual reconnect (restart the channel) resolved it.
 
 False-positive reports are especially valuable: the rule's calibration depends on them.
