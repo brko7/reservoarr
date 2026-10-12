@@ -11,7 +11,7 @@ A delay-buffer **stream profile for [Dispatcharr](https://github.com/Dispatcharr
 upstream HTTP  ──►  RAM reservoir  ──►  paced release  ──►  ffmpeg remux  ──►  Dispatcharr  ──►  Plex
 (urllib, eager  (≤256MB,             (byte-rate sleeps      (video copy +
  fetch,          ~30s target          @ PCR content          dump_extra,
- auto-reconnect) cushion)             rate)                  audio → AC3)
+ auto-reconnect) cushion)             rate)                  audio → AC3/AAC)
 ```
 
 Plex Live TV's tuner gives up after ~15s of input starvation. IPTV CDNs commonly deliver TS in short bursts with prime-time gaps that exceed this, plus corrupt packets with garbage DTS, mid-stream EOFs, and per-connection corrupt-loops. `reservoarr.py` sits between the CDN and Plex, eagerly drains the upstream into a RAM reservoir, and releases bytes to ffmpeg at the stream's measured PCR content rate — so playback runs ~30s behind live and gaps shorter than the cushion are invisible to Plex.

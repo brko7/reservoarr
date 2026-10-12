@@ -70,6 +70,12 @@ TS_SUSTAIN_WINS = int(os.getenv("RESV_TS_SUSTAIN_WINS", "2"))         # consecut
 STALL_S = float(os.getenv("RESV_STALL_S", "25"))                      # no-ingest watchdog (#4); >CDN burst-gap, <urlopen 30s; 0=off
 GIVEUP_TRIES = int(os.getenv("RESV_GIVEUP_TRIES", "0"))               # exit after N no-data upstream tries so Dispatcharr fails over; 0=retry forever
 REJECT_MP4 = os.getenv("RESV_REJECT_MP4", "0") == "1"
+AUDIO_ARGS = {
+    "ac3": ["-c:a", "ac3", "-b:a", "192k", "-ac", "2"],
+    "aac": ["-c:a", "aac", "-b:a", "192k", "-ac", "2", "-ar", "48000"],
+}
+AUDIO_CODEC_REQUESTED = os.getenv("RESV_AUDIO_CODEC", "ac3").strip().lower()
+AUDIO_CODEC = AUDIO_CODEC_REQUESTED if AUDIO_CODEC_REQUESTED in AUDIO_ARGS else "ac3"
 REPLAY_SKIP = os.getenv("RESV_REPLAY_SKIP", "0") == "1"
 REPLAY_MAX_S = float(os.getenv("RESV_REPLAY_MAX_S", "60"))
 REPLAY_HOLD_BYTES = 1024 * 1024
@@ -102,7 +108,7 @@ FFMPEG_CMD = [
     "-i", "pipe:0",
     "-map", "0:v", "-map", "0:a:0",
     "-c:v", "copy", "-bsf:v", "dump_extra=freq=keyframe",
-    "-c:a", "ac3", "-b:a", "192k", "-ac", "2",
+    *AUDIO_ARGS[AUDIO_CODEC],
     *(["-metadata:s:a:0", f"language={AUDIO_LANG}"] if AUDIO_LANG_OK else []),
     "-f", "mpegts", "-muxdelay", "0", "-muxpreload", "0", "pipe:1",
 ]
@@ -859,9 +865,16 @@ def next_slice():
         return d, released
 
 
+def announce_audio_codec():
+    if AUDIO_CODEC != AUDIO_CODEC_REQUESTED:
+        log(f"RESV_AUDIO_CODEC={AUDIO_CODEC_REQUESTED!r} is not one of {', '.join(AUDIO_ARGS)}; "
+            f"encoding audio as {AUDIO_CODEC}")
+
+
 def main():
     if AUDIO_LANG and not AUDIO_LANG_OK:
         log(f"RESV_AUDIO_LANG={AUDIO_LANG!r} is not a 3-letter code (e.g. fra); ignored")
+    announce_audio_codec()
     t = threading.Thread(target=fetcher, daemon=True)
     t.start()
 

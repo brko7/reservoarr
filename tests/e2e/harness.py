@@ -206,3 +206,4 @@ def ffprobe_video_pts(path: Path) -> list[float]:
     )
     values = (line.split(",")[0].strip() for line in out.splitlines())
     return [float(v) for v in values if v and v != "N/A"]
+
