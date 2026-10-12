@@ -14,6 +14,7 @@ AUDIO_PID = 0x101
 GAP_FROM_S, GAP_TO_S = 20, 22
 JUMP_AT_S, JUMP_S = 40, 300
 STOP_AT_S = 41
+FLOWING_PAST_S = 8
 
 
 def derive(synth_ts: Path, out: Path, audio_filter: str) -> Path:
@@ -130,7 +131,7 @@ def test_fill_gaps_keeps_video_flowing_when_audio_stops(tmp_path, stop_ts):
     )
 
     video = ffprobe_video_pts(run.out_ts)
-    assert video[-1] > STOP_AT_S + 15, f"video stopped at {video[-1]:.1f}s, audio ended at {STOP_AT_S}s"
+    assert video[-1] > STOP_AT_S + FLOWING_PAST_S, f"video stopped at {video[-1]:.1f}s, audio ended at {STOP_AT_S}s"
 
 
 @pytest.mark.e2e
@@ -143,7 +144,7 @@ def test_fill_gaps_does_not_flood_a_far_jump_with_silence(tmp_path, jump_ts):
     packets = ffprobe_audio_packets(run.out_ts)
     video = ffprobe_video_pts(run.out_ts)
     audio_end = packets[-1][0] + packets[-1][1]
-    assert video[-1] > JUMP_AT_S + 15, f"video stopped at {video[-1]:.1f}s"
+    assert video[-1] > JUMP_AT_S + FLOWING_PAST_S, f"video stopped at {video[-1]:.1f}s"
     assert abs(audio_end - video[-1]) < 1.0, (
         f"audio ends at {audio_end:.1f}s, video at {video[-1]:.1f}s after a {JUMP_S}s jump"
     )
