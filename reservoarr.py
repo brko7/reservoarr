@@ -84,7 +84,9 @@ REPLAY_MIN_CUSHION_S = 3.0
 REPLAY_STEP_MAX_S = 10.0
 TS_WRAP_S = (1 << 33) / 90000.0                                       # PCR base wraps every ~26.5h
 VIDEO_STREAM_TYPES = frozenset({0x01, 0x02, 0x10, 0x1B, 0x24, 0x42, 0xEA})
-VIDEO_HOLE_S = 0.5
+AUDIO_STREAM_TYPES = frozenset({0x03, 0x04, 0x0F, 0x11, 0x81, 0x87})
+AUDIO_DESCRIPTOR_TAGS = frozenset({0x6A, 0x7A, 0x7C})
+STREAM_HOLE_S = 0.5
 
 FFMPEG_BIN = os.getenv("RESV_FFMPEG_BIN", "/usr/local/bin/ffmpeg")    # Dispatcharr AIO container default
 # Dispatcharr's buffering watchdog only reads `speed=` off a stderr line that also
@@ -332,6 +334,50 @@ def psi_section(buf_, start, end, table_id):
     return s, min(s + 3 + length - 4, end)
 
 
+def carries_audio(stream_type, buf_, start, end):
+    if stream_type in AUDIO_STREAM_TYPES:
+        return True
+    if stream_type != 0x06:
+        return False
+    while start + 2 <= end:
+        if buf_[start] in AUDIO_DESCRIPTOR_TAGS:
+            return True
+        start += 2 + buf_[start + 1]
+    return False
+
+
+class TrackHoles:
+    def __init__(self):
+        self.pid = None
+        self.last = None
+        self.span = 0.0
+        self.holes = 0.0
+        self.seen = False
+
+    def adopt(self, pid):
+        if pid != self.pid:
+            self.pid = pid
+            self.last = None
+
+    def observe(self, t, disc):
+        self.seen = True
+        last, self.last = self.last, t
+        if last is None or disc:
+            return
+        delta = ((t - last) % (1 << 33)) / 90000.0
+        if delta >= 10.0:
+            return
+        self.span += delta
+        if delta > STREAM_HOLE_S:
+            self.holes += delta
+
+    def take(self):
+        span, holes, seen = self.span, self.holes, self.seen
+        self.span = self.holes = 0.0
+        self.seen = False
+        return (round(100 * holes / span) if span > 0 else 0), seen
+
+
 def packet_pcr(buf_, i):
     if not buf_[i + 3] & 0x20:
         return None
@@ -368,9 +414,8 @@ class TsParser:
         self.rate_marks = deque()                                     # (in_total, cum_pcr), ~90s content span
         self.cush_marks = deque()                                     # (in_total, cum_pcr), popped as released
         self.pmt_pid = None
-        self.video_pid = None
-        self.video_span = 0.0
-        self.video_holes = 0.0
+        self.video = TrackHoles()
+        self.audio = TrackHoles()
         self.on_reconnect()
 
     def on_reconnect(self):
@@ -384,7 +429,7 @@ class TsParser:
         self.pcr_pid = None
         self.last_pcr = None
         self.reject_run = 0
-        self.last_video_time = None
+        self.video.last = self.audio.last = None
 
     def feed(self, data):
         buf_ = self.carry + data if self.carry else data
@@ -428,8 +473,10 @@ class TsParser:
                     self._pat(buf_, start, end)
                 elif pid == self.pmt_pid:
                     self._pmt(buf_, start, end)
-                elif pid == self.video_pid:
-                    self._video_pes(buf_, start, end, disc)
+                elif pid == self.video.pid:
+                    self._pes(buf_, start, end, disc, self.video)
+                elif pid == self.audio.pid:
+                    self._pes(buf_, start, end, disc, self.audio)
         if afc & 0x1:                                                 # CC increments only on payload packets
             cc = b3 & 0x0F
             prev = self.cc.get(pid)
@@ -501,39 +548,37 @@ class TsParser:
         if s + 12 > stop:
             return
         j = s + 12 + ((buf_[s + 10] & 0x0F) << 8 | buf_[s + 11])
+        video = audio = None
         while j + 5 <= stop:
-            if buf_[j] in VIDEO_STREAM_TYPES:
-                pid = (buf_[j + 1] & 0x1F) << 8 | buf_[j + 2]
-                if pid != self.video_pid:
-                    self.video_pid = pid
-                    self.last_video_time = None
-                return
-            j += 5 + ((buf_[j + 3] & 0x0F) << 8 | buf_[j + 4])
+            pid = (buf_[j + 1] & 0x1F) << 8 | buf_[j + 2]
+            info = (buf_[j + 3] & 0x0F) << 8 | buf_[j + 4]
+            if video is None and buf_[j] in VIDEO_STREAM_TYPES:
+                video = pid
+            elif audio is None and carries_audio(buf_[j], buf_, j + 5, min(j + 5 + info, stop)):
+                audio = pid
+            j += 5 + info
+        if video is not None:
+            self.video.adopt(video)
+        if audio is not None:
+            self.audio.adopt(audio)
 
-    def _video_pes(self, buf_, start, end, disc):
+    def _pes(self, buf_, start, end, disc, track):
         if start + 14 > end or buf_[start:start + 3] != b"\x00\x00\x01":
             return
         flags = buf_[start + 7] & 0xC0
         if flags == 0xC0 and start + 19 <= end:
-            t = pes_time(buf_, start + 14)
+            track.observe(pes_time(buf_, start + 14), disc)
         elif flags & 0x80:
-            t = pes_time(buf_, start + 9)
-        else:
-            return
-        last, self.last_video_time = self.last_video_time, t
-        if last is None or disc:
-            return
-        delta = ((t - last) % (1 << 33)) / 90000.0
-        if delta >= 10.0:
-            return
-        self.video_span += delta
-        if delta > VIDEO_HOLE_S:
-            self.video_holes += delta
+            track.observe(pes_time(buf_, start + 9), disc)
 
-    def take_video_holes_pct(self):
-        span, holes = self.video_span, self.video_holes
-        self.video_span = self.video_holes = 0.0
-        return round(100 * holes / span) if span > 0 else 0
+    def take_holes_pct(self):
+        video, video_seen = self.video.take()
+        audio, audio_seen = self.audio.take()
+        if video_seen and self.audio.pid is not None and not audio_seen:
+            audio = 100
+        if audio_seen and self.video.pid is not None and not video_seen:
+            video = 100
+        return video, audio
 
     def content_rate(self):
         """Mux bytes per second of content time, or None before PCR lock."""
@@ -1058,12 +1103,13 @@ def main():
             if now - last_stats >= STATS_EVERY_S:
                 orate = out_since_stats / (now - last_stats)
                 src = "pcr" if cush_pcr is not None else "byte"
+                vholes, aholes = parser.take_holes_pct()
                 log(f"cushion={cush:.0f}s({src}) buf={buf_bytes / 1e6:.1f}MB "
                     f"out={orate * 8 / 1e6:.2f}Mbps in={in_rate() * 8 / 1e6:.2f}Mbps "
                     f"crate={(crate or 0) * 8 / 1e6:.2f}Mbps in_total={in_total / 1e6:.0f}MB "
                     f"reconnects={reconnects} ccerr={parser.cc_errors} "
                     f"pcrrej={parser.pcr_rejects} disc={parser.pcr_disc} sync={parser.sync_losses} "
-                    f"pcr_back={parser.pcr_back} holes={parser.take_video_holes_pct()}%",
+                    f"pcr_back={parser.pcr_back} vholes={vholes}% aholes={aholes}%",
                     stderr=False)
                 # #5 ingest-side corruption detector: sustained CC/sync errors
                 # while bytes still flow => wedged/corrupt upstream (fires ~30s

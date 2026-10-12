@@ -70,7 +70,7 @@ class Run:
             r"disc=(?P<disc>\d+)\s+"
             r"sync=(?P<sync>\d+)\s+"
             r"pcr_back=(?P<pcr_back>\d+)"
-            r"(?:\s+holes=(?P<holes>\d+)%)?"
+            r"(?:\s+vholes=(?P<vholes>\d+)%\s+aholes=(?P<aholes>\d+)%)?"
         )
         out = []
         for line in self.log_file.read_text().splitlines():
