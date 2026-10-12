@@ -12,6 +12,7 @@ RESERVOIR_PATH = REPO_ROOT / "reservoarr.py"
 
 AC3 = ["-c:a", "ac3", "-b:a", "192k", "-ac", "2"]
 AAC = ["-c:a", "aac", "-b:a", "192k", "-ac", "2", "-ar", "48000"]
+FILL = ["-af", "aresample=async=1"]
 
 
 def load(tmp_log_dir, **env):
@@ -71,10 +72,21 @@ def test_a_valid_codec_logs_nothing(tmp_path, capsys):
     assert "RESV_AUDIO_CODEC" not in journal(resv)
 
 
+def test_fill_gaps_is_opt_in(tmp_path):
+    assert "-af" not in load(tmp_path).FFMPEG_CMD
+
+
+@pytest.mark.parametrize("codec, args", [("ac3", AC3), ("aac", AAC)])
+def test_fill_gaps_follows_either_codec(tmp_path, codec, args):
+    resv = load(tmp_path, RESV_AUDIO_CODEC=codec, RESV_AUDIO_FILL_GAPS="1")
+
+    assert audio_args(resv.FFMPEG_CMD) == args + FILL
+
+
 def test_the_ts_offset_command_keeps_the_audio_args(tmp_path):
-    resv = load(tmp_path, RESV_AUDIO_CODEC="aac")
+    resv = load(tmp_path, RESV_AUDIO_CODEC="aac", RESV_AUDIO_FILL_GAPS="1")
 
     cmd = resv.ffmpeg_cmd(12.5)
 
-    assert audio_args(cmd) == AAC
+    assert audio_args(cmd) == AAC + FILL
     assert cmd[cmd.index("-output_ts_offset") + 1] == "12.500000"

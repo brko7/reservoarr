@@ -207,3 +207,17 @@ def ffprobe_video_pts(path: Path) -> list[float]:
     values = (line.split(",")[0].strip() for line in out.splitlines())
     return [float(v) for v in values if v and v != "N/A"]
 
+
+def ffprobe_audio_packets(path: Path) -> list[tuple[float, float]]:
+    ffprobe = os.environ.get("FFPROBE_BIN") or shutil.which("ffprobe") or "ffprobe"
+    out = subprocess.check_output(
+        [ffprobe, "-v", "error", "-select_streams", "a:0", "-show_entries",
+         "packet=pts_time,duration_time", "-of", "csv=p=0", str(path)],
+        text=True,
+    )
+    packets = []
+    for line in out.splitlines():
+        fields = [f.strip() for f in line.split(",")]
+        if len(fields) >= 2 and "N/A" not in fields[:2] and all(fields[:2]):
+            packets.append((float(fields[0]), float(fields[1])))
+    return packets
