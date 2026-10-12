@@ -5,7 +5,7 @@
 ## Stats line
 
 ```
-2026-06-14T10:03:33+0200 [500004175] cushion=27s(pcr) buf=15.5MB out=4.66Mbps in=4.96Mbps crate=4.80Mbps in_total=1843MB reconnects=0 ccerr=0 pcrrej=0 disc=0 sync=0 pcr_back=0
+2026-06-14T10:03:33+0200 [500004175] cushion=27s(pcr) buf=15.5MB out=4.66Mbps in=4.96Mbps crate=4.80Mbps in_total=1843MB reconnects=0 ccerr=0 pcrrej=0 disc=0 sync=0 pcr_back=0 holes=0%
 ```
 
 | Field | Meaning |
@@ -19,6 +19,7 @@
 | `reconnects=N` | Upstream reconnects this session. |
 | `ccerr/pcrrej/disc/sync` | TS continuity-counter errors / rejected PCR samples (garbage timestamps) / spec-legal discontinuities / sync losses. Healthy = flat zero. |
 | `pcr_back=N` | Backward PCR jumps > 0.5s (CDN overlap-replay signal — provider re-served N seconds of content). Each event also emits a `pcr backward jump: -Xs (last=… cur=…)` log line. Log-only; pacing is unchanged. Healthy = flat zero. |
+| `holes=N%` | Share of the window's content that the video is missing: the gaps longer than 0.5s between consecutive video timestamps (DTS, or PTS when a PES carries no DTS), over the span those timestamps cover since the previous line. The video PID comes from the PAT and PMT. A reconnect seam, a flagged discontinuity and a jump of 10s or more are not counted. A source that arrives at full rate but drops whole segments shows up here and nowhere else: `in` matches `crate` because the PCR jumps with the content. Healthy = flat zero; `0` also while no video timestamp has been seen. |
 
 ## Lifecycle events
 

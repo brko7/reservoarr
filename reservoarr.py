@@ -83,6 +83,8 @@ REPLAY_HOLD_BYTES = 1024 * 1024
 REPLAY_MIN_CUSHION_S = 3.0
 REPLAY_STEP_MAX_S = 10.0
 TS_WRAP_S = (1 << 33) / 90000.0                                       # PCR base wraps every ~26.5h
+VIDEO_STREAM_TYPES = frozenset({0x01, 0x02, 0x10, 0x1B, 0x24, 0x42, 0xEA})
+VIDEO_HOLE_S = 0.5
 
 FFMPEG_BIN = os.getenv("RESV_FFMPEG_BIN", "/usr/local/bin/ffmpeg")    # Dispatcharr AIO container default
 # Dispatcharr's buffering watchdog only reads `speed=` off a stderr line that also
@@ -317,6 +319,19 @@ def pcr_seconds(buf_, i):
     return (base * 300 + ext) / 27_000_000.0
 
 
+def pes_time(buf_, i):
+    return ((buf_[i] >> 1 & 0x7) << 30 | buf_[i + 1] << 22 | (buf_[i + 2] >> 1) << 15
+            | buf_[i + 3] << 7 | buf_[i + 4] >> 1)
+
+
+def psi_section(buf_, start, end, table_id):
+    s = start + 1 + buf_[start]
+    if s + 3 > end or buf_[s] != table_id:
+        return None
+    length = (buf_[s + 1] & 0x0F) << 8 | buf_[s + 2]
+    return s, min(s + 3 + length - 4, end)
+
+
 def packet_pcr(buf_, i):
     if not buf_[i + 3] & 0x20:
         return None
@@ -352,6 +367,10 @@ class TsParser:
         self.cum_pcr = 0.0
         self.rate_marks = deque()                                     # (in_total, cum_pcr), ~90s content span
         self.cush_marks = deque()                                     # (in_total, cum_pcr), popped as released
+        self.pmt_pid = None
+        self.video_pid = None
+        self.video_span = 0.0
+        self.video_holes = 0.0
         self.on_reconnect()
 
     def on_reconnect(self):
@@ -365,6 +384,7 @@ class TsParser:
         self.pcr_pid = None
         self.last_pcr = None
         self.reject_run = 0
+        self.last_video_time = None
 
     def feed(self, data):
         buf_ = self.carry + data if self.carry else data
@@ -400,6 +420,16 @@ class TsParser:
                 disc = True                                           # discontinuity_indicator: CC jump legal
             if aflen >= 7 and buf_[i + 5] & 0x10:                     # PCR_flag
                 self._pcr(buf_, i, pid, disc)
+        if afc & 0x1 and buf_[i + 1] & 0x40:
+            start = i + 4 + (1 + buf_[i + 4] if afc & 0x2 else 0)
+            end = i + 188
+            if start < end:
+                if pid == 0:
+                    self._pat(buf_, start, end)
+                elif pid == self.pmt_pid:
+                    self._pmt(buf_, start, end)
+                elif pid == self.video_pid:
+                    self._video_pes(buf_, start, end, disc)
         if afc & 0x1:                                                 # CC increments only on payload packets
             cc = b3 & 0x0F
             prev = self.cc.get(pid)
@@ -452,6 +482,58 @@ class TsParser:
             if self.reject_run > 25:                                  # chain wedged on an accepted garbage
                 self.last_pcr = pcr                                   # sample: re-anchor on the live values
                 self.reject_run = 0
+
+    def _pat(self, buf_, start, end):
+        section = psi_section(buf_, start, end, 0x00)
+        if not section:
+            return
+        s, stop = section
+        for j in range(s + 8, stop - 3, 4):
+            if buf_[j] << 8 | buf_[j + 1]:
+                self.pmt_pid = (buf_[j + 2] & 0x1F) << 8 | buf_[j + 3]
+                return
+
+    def _pmt(self, buf_, start, end):
+        section = psi_section(buf_, start, end, 0x02)
+        if not section:
+            return
+        s, stop = section
+        if s + 12 > stop:
+            return
+        j = s + 12 + ((buf_[s + 10] & 0x0F) << 8 | buf_[s + 11])
+        while j + 5 <= stop:
+            if buf_[j] in VIDEO_STREAM_TYPES:
+                pid = (buf_[j + 1] & 0x1F) << 8 | buf_[j + 2]
+                if pid != self.video_pid:
+                    self.video_pid = pid
+                    self.last_video_time = None
+                return
+            j += 5 + ((buf_[j + 3] & 0x0F) << 8 | buf_[j + 4])
+
+    def _video_pes(self, buf_, start, end, disc):
+        if start + 14 > end or buf_[start:start + 3] != b"\x00\x00\x01":
+            return
+        flags = buf_[start + 7] & 0xC0
+        if flags == 0xC0 and start + 19 <= end:
+            t = pes_time(buf_, start + 14)
+        elif flags & 0x80:
+            t = pes_time(buf_, start + 9)
+        else:
+            return
+        last, self.last_video_time = self.last_video_time, t
+        if last is None or disc:
+            return
+        delta = ((t - last) % (1 << 33)) / 90000.0
+        if delta >= 10.0:
+            return
+        self.video_span += delta
+        if delta > VIDEO_HOLE_S:
+            self.video_holes += delta
+
+    def take_video_holes_pct(self):
+        span, holes = self.video_span, self.video_holes
+        self.video_span = self.video_holes = 0.0
+        return round(100 * holes / span) if span > 0 else 0
 
     def content_rate(self):
         """Mux bytes per second of content time, or None before PCR lock."""
@@ -981,7 +1063,7 @@ def main():
                     f"crate={(crate or 0) * 8 / 1e6:.2f}Mbps in_total={in_total / 1e6:.0f}MB "
                     f"reconnects={reconnects} ccerr={parser.cc_errors} "
                     f"pcrrej={parser.pcr_rejects} disc={parser.pcr_disc} sync={parser.sync_losses} "
-                    f"pcr_back={parser.pcr_back}",
+                    f"pcr_back={parser.pcr_back} holes={parser.take_video_holes_pct()}%",
                     stderr=False)
                 # #5 ingest-side corruption detector: sustained CC/sync errors
                 # while bytes still flow => wedged/corrupt upstream (fires ~30s

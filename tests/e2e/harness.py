@@ -70,13 +70,14 @@ class Run:
             r"disc=(?P<disc>\d+)\s+"
             r"sync=(?P<sync>\d+)\s+"
             r"pcr_back=(?P<pcr_back>\d+)"
+            r"(?:\s+holes=(?P<holes>\d+)%)?"
         )
         out = []
         for line in self.log_file.read_text().splitlines():
             m = pat.search(line)
             if m:
                 d = {k: float(v) if "." in v else int(v) for k, v in m.groupdict().items()
-                     if k not in ("src",)}
+                     if k not in ("src",) and v is not None}
                 d["src"] = m.group("src")
                 d["raw"] = line
                 out.append(d)
