@@ -241,3 +241,21 @@ def test_dropping_audio_four_seconds_in_eight_from_the_fixture_shows_up(resv):
     video_pct, audio_pct = resv.parser.take_holes_pct()
     assert video_pct == 0
     assert audio_pct >= 30
+
+
+def test_a_sliver_of_video_without_audio_is_not_missing_sound(resv):
+    resv.parser.feed(stream(frames(100, 110), audio_frames(100, 110)))
+    resv.parser.take_holes_pct()
+
+    resv.parser.feed(b"".join(video_pes(t) for t in frames(110, 112)))
+
+    assert resv.parser.take_holes_pct() == (0, 0)
+
+
+def test_five_seconds_of_video_without_audio_is_missing_sound(resv):
+    resv.parser.feed(stream(frames(100, 110), audio_frames(100, 110)))
+    resv.parser.take_holes_pct()
+
+    resv.parser.feed(b"".join(video_pes(t) for t in frames(110, 116)))
+
+    assert resv.parser.take_holes_pct() == (0, 100)

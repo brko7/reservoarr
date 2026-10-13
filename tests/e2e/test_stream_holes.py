@@ -89,3 +89,11 @@ def test_a_source_missing_half_its_sound_reports_it(tmp_path, holed):
 def test_sound_that_stops_while_the_picture_runs_reports_all_of_it_missing(tmp_path, holed):
     lines = telemetry(tmp_path, holed["mute"])
     assert (0, 100) in lines, f"per window: {lines}"
+
+
+@pytest.mark.e2e
+def test_a_reconnect_does_not_read_as_a_missing_track(tmp_path, synth_ts):
+    run = run_pipeline(tmp_path, synth_ts, rate_bps=300_010, duration_s=75, eof_at=40.0)
+    lines = [(s["vholes"], s["aholes"]) for s in run.stats_lines()]
+    assert "upstream EOF" in run.log_text(), f"no EOF happened\nstderr:\n{run.resv_stderr}"
+    assert all(v < 100 and a < 100 for v, a in lines), f"per window: {lines}"

@@ -87,6 +87,7 @@ VIDEO_STREAM_TYPES = frozenset({0x01, 0x02, 0x10, 0x1B, 0x24, 0x42, 0xEA})
 AUDIO_STREAM_TYPES = frozenset({0x03, 0x04, 0x0F, 0x11, 0x81, 0x87})
 AUDIO_DESCRIPTOR_TAGS = frozenset({0x6A, 0x7A, 0x7C})
 STREAM_HOLE_S = 0.5
+TRACK_MISSING_AFTER_S = 5.0
 
 FFMPEG_BIN = os.getenv("RESV_FFMPEG_BIN", "/usr/local/bin/ffmpeg")    # Dispatcharr AIO container default
 # Dispatcharr's buffering watchdog only reads `speed=` off a stderr line that also
@@ -375,7 +376,7 @@ class TrackHoles:
         span, holes, seen = self.span, self.holes, self.seen
         self.span = self.holes = 0.0
         self.seen = False
-        return (round(100 * holes / span) if span > 0 else 0), seen
+        return (round(100 * holes / span) if span > 0 else 0), seen, span
 
 
 def packet_pcr(buf_, i):
@@ -572,11 +573,11 @@ class TsParser:
             track.observe(pes_time(buf_, start + 9), disc)
 
     def take_holes_pct(self):
-        video, video_seen = self.video.take()
-        audio, audio_seen = self.audio.take()
-        if video_seen and self.audio.pid is not None and not audio_seen:
+        video, video_seen, video_span = self.video.take()
+        audio, audio_seen, audio_span = self.audio.take()
+        if video_span >= TRACK_MISSING_AFTER_S and self.audio.pid is not None and not audio_seen:
             audio = 100
-        if audio_seen and self.video.pid is not None and not video_seen:
+        if audio_span >= TRACK_MISSING_AFTER_S and self.video.pid is not None and not video_seen:
             video = 100
         return video, audio
 
