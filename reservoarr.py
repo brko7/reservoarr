@@ -868,7 +868,7 @@ def next_slice():
 
 
 def announce_audio_codec():
-    if AUDIO_CODEC != AUDIO_CODEC_REQUESTED:
+    if AUDIO_CODEC_REQUESTED and AUDIO_CODEC != AUDIO_CODEC_REQUESTED:
         log(f"RESV_AUDIO_CODEC={AUDIO_CODEC_REQUESTED!r} is not one of {', '.join(AUDIO_ARGS)}; "
             f"encoding audio as {AUDIO_CODEC}")
 

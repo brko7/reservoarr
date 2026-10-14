@@ -37,7 +37,7 @@ def journal(resv):
     return path.read_text() if path.exists() else ""
 
 
-def test_default_audio_is_the_6_3_8_ac3_encode(tmp_path):
+def test_default_audio_is_unchanged_ac3(tmp_path):
     assert audio_args(load(tmp_path).FFMPEG_CMD) == AC3
 
 
@@ -61,6 +61,15 @@ def test_a_fallback_is_logged(tmp_path, capsys):
 
     assert "RESV_AUDIO_CODEC='copy'" in capsys.readouterr().err
     assert "encoding audio as ac3" in journal(resv)
+
+
+def test_an_empty_setting_logs_nothing(tmp_path, capsys):
+    resv = load(tmp_path, RESV_AUDIO_CODEC="")
+
+    resv.announce_audio_codec()
+
+    assert "RESV_AUDIO_CODEC" not in capsys.readouterr().err
+    assert "RESV_AUDIO_CODEC" not in journal(resv)
 
 
 def test_a_valid_codec_logs_nothing(tmp_path, capsys):
