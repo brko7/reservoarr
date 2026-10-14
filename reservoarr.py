@@ -89,6 +89,7 @@ AUDIO_DESCRIPTOR_TAGS = frozenset({0x6A, 0x7A, 0x7C})
 STREAM_HOLE_S = 0.5
 TRACK_MISSING_AFTER_S = 5.0
 PSI_MAX_BYTES = 1024
+PES_HEAD_BYTES = 19
 
 FFMPEG_BIN = os.getenv("RESV_FFMPEG_BIN", "/usr/local/bin/ffmpeg")    # Dispatcharr AIO container default
 # Dispatcharr's buffering watchdog only reads `speed=` off a stderr line that also
@@ -348,11 +349,13 @@ class TrackHoles:
         self.holes = 0.0
         self.seen = False
         self.pending_disc = False
+        self.head = None
 
     def adopt(self, pid):
         if pid != self.pid:
             self.pid = pid
             self.last = None
+            self.head = None
 
     def observe(self, t):
         skip, self.pending_disc = self.pending_disc, False
@@ -427,6 +430,7 @@ class TsParser:
         self.last_pcr = None
         self.reject_run = 0
         self.video.last = self.audio.last = None
+        self.video.head = self.audio.head = None
         self.psi = {}
 
     def feed(self, data):
@@ -472,10 +476,10 @@ class TsParser:
             if start < end:
                 if pid == 0 or pid == self.pmt_pid:
                     self._psi(buf_, start, end, pid, pusi)
-                elif pusi and pid == self.video.pid:
-                    self._pes(buf_, start, end, self.video)
-                elif pusi and pid == self.audio.pid:
-                    self._pes(buf_, start, end, self.audio)
+                elif pid == self.video.pid and (pusi or self.video.head is not None):
+                    self._pes(buf_, start, end, self.video, pusi)
+                elif pid == self.audio.pid and (pusi or self.audio.head is not None):
+                    self._pes(buf_, start, end, self.audio, pusi)
         if afc & 0x1:                                                 # CC increments only on payload packets
             cc = b3 & 0x0F
             prev = self.cc.get(pid)
@@ -547,6 +551,8 @@ class TsParser:
                 return
             if len(section) >= total:
                 self.psi.pop(pid, None)
+                if total < 8 or not section[5] & 0x01:
+                    return
                 if pid == 0:
                     self._pat(bytes(section[:total]))
                 else:
@@ -583,16 +589,25 @@ class TsParser:
             self.video.adopt(video)
             self.audio.adopt(audio)
 
-    def _pes(self, buf_, start, end, track):
-        if start + 14 > end or buf_[start:start + 3] != b"\x00\x00\x01":
-            return
-        flags = buf_[start + 7] & 0xC0
-        if flags == 0xC0 and start + 19 <= end:
-            t = pes_time(buf_, start + 14)
-        elif flags & 0x80:
-            t = pes_time(buf_, start + 9)
+    def _pes(self, buf_, start, end, track, pusi):
+        if pusi:
+            head = bytes(buf_[start:min(end, start + PES_HEAD_BYTES)])
         else:
+            head = track.head + bytes(buf_[start:min(end, start + PES_HEAD_BYTES - len(track.head))])
+        track.head = None
+        if len(head) < 9:
+            track.head = head
             return
+        if head[:3] != b"\x00\x00\x01":
+            return
+        flags = head[7] & 0xC0
+        need = 19 if flags == 0xC0 else 14 if flags & 0x80 else 0
+        if not need:
+            return
+        if len(head) < need:
+            track.head = head
+            return
+        t = pes_time(head, 14 if flags == 0xC0 else 9)
         with self.holes_lock:
             track.observe(t)
 

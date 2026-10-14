@@ -362,3 +362,48 @@ def test_counting_a_timestamp_waits_for_the_lock(resv):
     assert not done.wait(0.2)
     resv.parser.holes_lock.release()
     assert done.wait(2)
+
+
+def pmt_not_yet_current(*streams):
+    body = bytes([0, 1, 0xC2, 0, 0, 0xE0 | VIDEO_PID >> 8, VIDEO_PID & 0xFF, 0xF0, 0x00]) + b"".join(streams)
+    section = bytes([0x02, 0xB0, len(body) + 4]) + body + b"\0\0\0\0"
+    return ts_packet(PMT_PID, b"\x00" + section)
+
+
+def split_video_pes(seconds, first_bytes=10):
+    ticks = int(seconds * 90000)
+    header = (b"\x00\x00\x01\xE0\x00\x00" + bytes([0x80, 0xC0, 10])
+              + pes_time_bytes(3, ticks + 3600) + pes_time_bytes(1, ticks) + b"\x00\x00\x00\x01")
+    stuffing = 184 - 1 - first_bytes
+    first = (bytes([0x47, 0x40 | VIDEO_PID >> 8, VIDEO_PID & 0xFF, 0x30, stuffing, 0x00])
+             + b"\xff" * (stuffing - 1) + header[:first_bytes])
+    rest = header[first_bytes:]
+    second = bytes([0x47, VIDEO_PID >> 8, VIDEO_PID & 0xFF, 0x11]) + rest + b"\xff" * (184 - len(rest))
+    return first + second
+
+
+def test_a_pmt_for_the_next_mapping_is_not_applied(resv):
+    resv.parser.feed(pat() + pmt() + null_packet())
+
+    resv.parser.feed(pmt_not_yet_current(elementary(0x1B, 0x200), elementary(0x0F, 0x201)) + null_packet() + null_packet())
+
+    assert resv.parser.video.pid == VIDEO_PID
+    assert resv.parser.audio.pid == AUDIO_PID
+
+
+def test_a_pes_header_split_over_two_packets_is_still_read(resv):
+    resv.parser.feed(pat() + pmt(elementary(0x1B, VIDEO_PID)) + null_packet())
+
+    resv.parser.feed(b"".join(split_video_pes(t) for t in frames(100, 104) + frames(106, 110)))
+
+    assert resv.parser.take_holes_pct() == (20, 0)
+
+
+def test_a_reconnect_drops_a_half_read_pes_header(resv):
+    resv.parser.feed(pat() + pmt(elementary(0x1B, VIDEO_PID)) + null_packet())
+    resv.parser.feed(split_video_pes(100)[:188] + null_packet() + null_packet())
+    assert resv.parser.video.head is not None
+
+    resv.parser.on_reconnect()
+
+    assert resv.parser.video.head is None
