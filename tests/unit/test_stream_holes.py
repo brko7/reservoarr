@@ -259,3 +259,106 @@ def test_five_seconds_of_video_without_audio_is_missing_sound(resv):
     resv.parser.feed(b"".join(video_pes(t) for t in frames(110, 116)))
 
     assert resv.parser.take_holes_pct() == (0, 100)
+
+
+PCR_PID = 0x1FF
+
+
+def pcr_packet(seconds, discontinuity=False):
+    base = int(seconds * 90000)
+    flags = 0x10 | (0x80 if discontinuity else 0)
+    field = bytes([flags, base >> 25 & 0xFF, base >> 17 & 0xFF, base >> 9 & 0xFF, base >> 1 & 0xFF,
+                   (base & 1) << 7 | 0x7E, 0x00])
+    field += b"\xff" * (183 - len(field))
+    return bytes([0x47, PCR_PID >> 8, PCR_PID & 0xFF, 0x20, 183]) + field
+
+
+def split_pmt(*streams):
+    body = bytes([0, 1, 0xC1, 0, 0, 0xE0 | VIDEO_PID >> 8, VIDEO_PID & 0xFF, 0xF0, 0x00]) + b"".join(streams)
+    section = bytes([0x02, 0xB0 | (len(body) + 4) >> 8, (len(body) + 4) & 0xFF]) + body + b"\0\0\0\0"
+    payload = b"\x00" + section
+    assert len(payload) > 184
+    first = bytes([0x47, 0x40 | PMT_PID >> 8, PMT_PID & 0xFF, 0x10]) + payload[:184]
+    rest = payload[184:]
+    second = bytes([0x47, PMT_PID >> 8, PMT_PID & 0xFF, 0x11]) + rest + b"\xff" * (184 - len(rest))
+    return first, second
+
+
+def long_pmt_streams():
+    padding = bytes([0x05, 200]) + b"\x00" * 200
+    return elementary(0x1B, VIDEO_PID, padding), elementary(0x0F, AUDIO_PID)
+
+
+def test_a_pmt_spanning_two_packets_is_put_back_together(resv):
+    first, second = split_pmt(*long_pmt_streams())
+
+    resv.parser.feed(pat() + first + second + null_packet())
+
+    assert resv.parser.video.pid == VIDEO_PID
+    assert resv.parser.audio.pid == AUDIO_PID
+
+
+def test_a_cut_off_pmt_clears_nothing(resv):
+    resv.parser.feed(pat() + pmt() + null_packet())
+    first, _ = split_pmt(elementary(0x1B, VIDEO_PID, bytes([0x05, 200]) + b"\x00" * 200))
+
+    resv.parser.feed(first + null_packet() + null_packet())
+
+    assert resv.parser.audio.pid == AUDIO_PID
+
+
+def test_a_track_the_pmt_drops_is_forgotten(resv):
+    resv.parser.feed(stream(frames(100, 110), audio_frames(100, 110)))
+    resv.parser.take_holes_pct()
+
+    resv.parser.feed(pmt(elementary(0x1B, VIDEO_PID)) + b"".join(video_pes(t) for t in frames(110, 125)))
+
+    assert resv.parser.audio.pid is None
+    assert resv.parser.take_holes_pct() == (0, 0)
+
+
+def test_a_discontinuity_on_the_pcr_pid_covers_the_jump_on_both_tracks(resv):
+    resv.parser.feed(pcr_packet(100) + stream(frames(100, 110), audio_frames(100, 110)) + pcr_packet(110))
+    resv.parser.take_holes_pct()
+    after = sorted([(t, video_pes(t)) for t in frames(113, 123)] + [(t, audio_pes(t)) for t in audio_frames(113, 123)])
+
+    resv.parser.feed(pcr_packet(500, discontinuity=True) + b"".join(packet for _, packet in after))
+
+    assert resv.parser.take_holes_pct() == (0, 0)
+
+
+def test_the_same_jump_without_the_flag_is_a_hole(resv):
+    resv.parser.feed(pcr_packet(100) + stream(frames(100, 110), audio_frames(100, 110)) + pcr_packet(110))
+    resv.parser.take_holes_pct()
+    after = sorted([(t, video_pes(t)) for t in frames(113, 123)] + [(t, audio_pes(t)) for t in audio_frames(113, 123)])
+
+    resv.parser.feed(pcr_packet(110.5) + b"".join(packet for _, packet in after))
+
+    video_pct, audio_pct = resv.parser.take_holes_pct()
+    assert video_pct > 0
+    assert audio_pct > 0
+
+
+def test_reading_the_window_waits_for_the_lock(resv):
+    import threading
+    done = threading.Event()
+    resv.parser.holes_lock.acquire()
+    reader = threading.Thread(target=lambda: (resv.parser.take_holes_pct(), done.set()))
+    reader.start()
+
+    assert not done.wait(0.2)
+    resv.parser.holes_lock.release()
+    assert done.wait(2)
+
+
+def test_counting_a_timestamp_waits_for_the_lock(resv):
+    import threading
+    resv.parser.feed(pat() + pmt() + null_packet())
+    done = threading.Event()
+    resv.parser.holes_lock.acquire()
+    feeder = threading.Thread(target=lambda: (resv.parser.feed(b"".join(video_pes(t) for t in frames(100, 101))), done.set()))
+    feeder.start()
+
+    assert not done.wait(0.2)
+    resv.parser.holes_lock.release()
+    assert done.wait(2)

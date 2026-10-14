@@ -88,6 +88,7 @@ AUDIO_STREAM_TYPES = frozenset({0x03, 0x04, 0x0F, 0x11, 0x81, 0x87})
 AUDIO_DESCRIPTOR_TAGS = frozenset({0x6A, 0x7A, 0x7C})
 STREAM_HOLE_S = 0.5
 TRACK_MISSING_AFTER_S = 5.0
+PSI_MAX_BYTES = 1024
 
 FFMPEG_BIN = os.getenv("RESV_FFMPEG_BIN", "/usr/local/bin/ffmpeg")    # Dispatcharr AIO container default
 # Dispatcharr's buffering watchdog only reads `speed=` off a stderr line that also
@@ -327,14 +328,6 @@ def pes_time(buf_, i):
             | buf_[i + 3] << 7 | buf_[i + 4] >> 1)
 
 
-def psi_section(buf_, start, end, table_id):
-    s = start + 1 + buf_[start]
-    if s + 3 > end or buf_[s] != table_id:
-        return None
-    length = (buf_[s + 1] & 0x0F) << 8 | buf_[s + 2]
-    return s, min(s + 3 + length - 4, end)
-
-
 def carries_audio(stream_type, buf_, start, end):
     if stream_type in AUDIO_STREAM_TYPES:
         return True
@@ -354,16 +347,18 @@ class TrackHoles:
         self.span = 0.0
         self.holes = 0.0
         self.seen = False
+        self.pending_disc = False
 
     def adopt(self, pid):
         if pid != self.pid:
             self.pid = pid
             self.last = None
 
-    def observe(self, t, disc):
+    def observe(self, t):
+        skip, self.pending_disc = self.pending_disc, False
         self.seen = True
         last, self.last = self.last, t
-        if last is None or disc:
+        if last is None or skip:
             return
         delta = ((t - last) % (1 << 33)) / 90000.0
         if delta >= 10.0:
@@ -417,6 +412,7 @@ class TsParser:
         self.pmt_pid = None
         self.video = TrackHoles()
         self.audio = TrackHoles()
+        self.holes_lock = threading.Lock()
         self.on_reconnect()
 
     def on_reconnect(self):
@@ -431,6 +427,7 @@ class TsParser:
         self.last_pcr = None
         self.reject_run = 0
         self.video.last = self.audio.last = None
+        self.psi = {}
 
     def feed(self, data):
         buf_ = self.carry + data if self.carry else data
@@ -466,18 +463,19 @@ class TsParser:
                 disc = True                                           # discontinuity_indicator: CC jump legal
             if aflen >= 7 and buf_[i + 5] & 0x10:                     # PCR_flag
                 self._pcr(buf_, i, pid, disc)
-        if afc & 0x1 and buf_[i + 1] & 0x40:
+        if disc and pid in (self.pcr_pid, self.video.pid, self.audio.pid):
+            self.video.pending_disc = self.audio.pending_disc = True
+        if afc & 0x1:
             start = i + 4 + (1 + buf_[i + 4] if afc & 0x2 else 0)
             end = i + 188
+            pusi = buf_[i + 1] & 0x40
             if start < end:
-                if pid == 0:
-                    self._pat(buf_, start, end)
-                elif pid == self.pmt_pid:
-                    self._pmt(buf_, start, end)
-                elif pid == self.video.pid:
-                    self._pes(buf_, start, end, disc, self.video)
-                elif pid == self.audio.pid:
-                    self._pes(buf_, start, end, disc, self.audio)
+                if pid == 0 or pid == self.pmt_pid:
+                    self._psi(buf_, start, end, pid, pusi)
+                elif pusi and pid == self.video.pid:
+                    self._pes(buf_, start, end, self.video)
+                elif pusi and pid == self.audio.pid:
+                    self._pes(buf_, start, end, self.audio)
         if afc & 0x1:                                                 # CC increments only on payload packets
             cc = b3 & 0x0F
             prev = self.cc.get(pid)
@@ -531,53 +529,81 @@ class TsParser:
                 self.last_pcr = pcr                                   # sample: re-anchor on the live values
                 self.reject_run = 0
 
-    def _pat(self, buf_, start, end):
-        section = psi_section(buf_, start, end, 0x00)
-        if not section:
+    def _psi(self, buf_, start, end, pid, pusi):
+        if pusi:
+            begin = start + 1 + buf_[start]
+            if begin >= end:
+                self.psi.pop(pid, None)
+                return
+            section = bytearray(buf_[begin:end])
+        elif pid in self.psi:
+            section = self.psi[pid] + buf_[start:end]
+        else:
             return
-        s, stop = section
-        for j in range(s + 8, stop - 3, 4):
-            if buf_[j] << 8 | buf_[j + 1]:
-                self.pmt_pid = (buf_[j + 2] & 0x1F) << 8 | buf_[j + 3]
+        if len(section) >= 3:
+            total = 3 + ((section[1] & 0x0F) << 8 | section[2])
+            if total > PSI_MAX_BYTES:
+                self.psi.pop(pid, None)
+                return
+            if len(section) >= total:
+                self.psi.pop(pid, None)
+                if pid == 0:
+                    self._pat(bytes(section[:total]))
+                else:
+                    self._pmt(bytes(section[:total]))
+                return
+        self.psi[pid] = section
+
+    def _pat(self, section):
+        if section[0] != 0x00:
+            return
+        for j in range(8, len(section) - 7, 4):
+            if section[j] << 8 | section[j + 1]:
+                pmt_pid = (section[j + 2] & 0x1F) << 8 | section[j + 3]
+                if pmt_pid != self.pmt_pid:
+                    self.psi.pop(self.pmt_pid, None)
+                    self.pmt_pid = pmt_pid
                 return
 
-    def _pmt(self, buf_, start, end):
-        section = psi_section(buf_, start, end, 0x02)
-        if not section:
+    def _pmt(self, section):
+        stop = len(section) - 4
+        if section[0] != 0x02 or stop < 12:
             return
-        s, stop = section
-        if s + 12 > stop:
-            return
-        j = s + 12 + ((buf_[s + 10] & 0x0F) << 8 | buf_[s + 11])
+        j = 12 + ((section[10] & 0x0F) << 8 | section[11])
         video = audio = None
         while j + 5 <= stop:
-            pid = (buf_[j + 1] & 0x1F) << 8 | buf_[j + 2]
-            info = (buf_[j + 3] & 0x0F) << 8 | buf_[j + 4]
-            if video is None and buf_[j] in VIDEO_STREAM_TYPES:
+            pid = (section[j + 1] & 0x1F) << 8 | section[j + 2]
+            info = (section[j + 3] & 0x0F) << 8 | section[j + 4]
+            if video is None and section[j] in VIDEO_STREAM_TYPES:
                 video = pid
-            elif audio is None and carries_audio(buf_[j], buf_, j + 5, min(j + 5 + info, stop)):
+            elif audio is None and carries_audio(section[j], section, j + 5, min(j + 5 + info, stop)):
                 audio = pid
             j += 5 + info
-        if video is not None:
+        with self.holes_lock:
             self.video.adopt(video)
-        if audio is not None:
             self.audio.adopt(audio)
 
-    def _pes(self, buf_, start, end, disc, track):
+    def _pes(self, buf_, start, end, track):
         if start + 14 > end or buf_[start:start + 3] != b"\x00\x00\x01":
             return
         flags = buf_[start + 7] & 0xC0
         if flags == 0xC0 and start + 19 <= end:
-            track.observe(pes_time(buf_, start + 14), disc)
+            t = pes_time(buf_, start + 14)
         elif flags & 0x80:
-            track.observe(pes_time(buf_, start + 9), disc)
+            t = pes_time(buf_, start + 9)
+        else:
+            return
+        with self.holes_lock:
+            track.observe(t)
 
     def take_holes_pct(self):
-        video, video_seen, video_span = self.video.take()
-        audio, audio_seen, audio_span = self.audio.take()
-        if video_span >= TRACK_MISSING_AFTER_S and self.audio.pid is not None and not audio_seen:
+        with self.holes_lock:
+            video, video_seen, video_span = self.video.take()
+            audio, audio_seen, audio_span = self.audio.take()
+            video_pid, audio_pid = self.video.pid, self.audio.pid
+        if video_span >= TRACK_MISSING_AFTER_S and audio_pid is not None and not audio_seen:
             audio = 100
-        if audio_span >= TRACK_MISSING_AFTER_S and self.video.pid is not None and not video_seen:
+        if audio_span >= TRACK_MISSING_AFTER_S and video_pid is not None and not video_seen:
             video = 100
         return video, audio
 
