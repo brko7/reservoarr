@@ -34,7 +34,7 @@ def forbidden(*_args, **_kwargs):
 
 
 @pytest.fixture
-def run(resv, monkeypatch):
+def run(resv, stream, monkeypatch):
     """Run the real fetcher against scripted upstream answers. Returns the
     number of upstream attempts and the backoff sleeps it took; `stop_after`
     ends the loop the way Dispatcharr's SIGTERM would."""
@@ -51,21 +51,21 @@ def run(resv, monkeypatch):
         def sleep(seconds):
             sleeps.append(seconds)
             if stop_after is not None and len(attempts) >= stop_after:
-                resv.stop.set()
+                stream.stop.set()
 
         monkeypatch.setattr(resv.urllib.request, "urlopen", urlopen)
         monkeypatch.setattr(resv.time, "sleep", sleep)
-        resv.fetcher()
+        stream.upstream.run()
         return len(attempts), sleeps
 
     return go
 
 
-def test_gives_up_after_the_configured_tries_without_data(resv, run, capsys):
+def test_gives_up_after_the_configured_tries_without_data(resv, stream, run, capsys):
     tries, sleeps = run([forbidden], giveup=3)
     assert tries == 3
     assert sleeps == [1, 2]
-    assert resv.upstream_eof is True
+    assert stream.reservoir.eof is True
     assert "giving up: no data after 3 upstream attempts" in capsys.readouterr().err
 
 
@@ -76,10 +76,10 @@ def test_default_keeps_retrying_as_before(resv, run, capsys):
     assert "giving up" not in capsys.readouterr().err
 
 
-def test_a_connect_that_closes_before_any_byte_counts_as_a_try(resv, run):
+def test_a_connect_that_closes_before_any_byte_counts_as_a_try(resv, stream, run):
     tries, _ = run([Response([])], giveup=2)
     assert tries == 2
-    assert resv.in_total == 0
+    assert stream.reservoir.in_total == 0
 
 
 MP4_HEAD = b"\x00\x00\x00 ftypisom\x00\x00\x02\x00isomiso2avc1mp41"
@@ -92,47 +92,48 @@ class Served(Response):
         self.headers["Content-Type"] = content_type
 
 
-def test_an_mp4_courtesy_file_counts_as_an_attempt_without_data(resv, run, capsys):
+def test_an_mp4_courtesy_file_counts_as_an_attempt_without_data(resv, stream, run, capsys):
     resv.REJECT_MP4 = True
     courtesy = Served([MP4_HEAD * 64], "video/mp4")
     tries, sleeps = run([courtesy], giveup=1)
     assert tries == 1
     assert sleeps == []
-    assert resv.in_total == 0
+    assert stream.reservoir.in_total == 0
     assert courtesy.closed is True
     err = capsys.readouterr().err
     assert "upstream sent an MP4 file, not a live TS" in err
     assert "giving up: no data after 1 upstream attempts" in err
 
 
-def test_an_mp4_is_recognised_by_its_ftyp_box_without_a_content_type(resv, run):
+def test_an_mp4_is_recognised_by_its_ftyp_box_without_a_content_type(resv, stream, run):
     resv.REJECT_MP4 = True
     tries, _ = run([Response([MP4_HEAD * 64])], giveup=1)
     assert tries == 1
-    assert resv.in_total == 0
+    assert stream.reservoir.in_total == 0
 
 
-def test_a_live_ts_labelled_video_mp4_is_taken_as_before(resv, run, capsys):
+def test_a_live_ts_labelled_video_mp4_is_taken_as_before(resv, stream, run, capsys):
     resv.REJECT_MP4 = True
     answers = [Served([NULL_PACKET * 4], "video/mp4"), forbidden]
     tries, _ = run(answers, giveup=1, stop_after=4)
     assert tries == 4
-    assert resv.in_total == len(NULL_PACKET) * 4
+    assert stream.reservoir.in_total == len(NULL_PACKET) * 4
     assert "MP4" not in capsys.readouterr().err
 
 
-def test_an_mp4_is_ingested_as_before_when_the_check_is_off(resv, run):
+def test_an_mp4_is_ingested_as_before_when_the_check_is_off(resv, stream, run):
     resv.REJECT_MP4 = False
     tries, _ = run([Served([MP4_HEAD * 64], "video/mp4"), forbidden], giveup=1, stop_after=3)
     assert tries == 3
-    assert resv.in_total == len(MP4_HEAD) * 64
+    padded = -(len(MP4_HEAD) * 64) % 188                 # filler back onto the packet grid (6.4.0)
+    assert stream.reservoir.in_total == len(MP4_HEAD) * 64 + padded
 
 
-def test_never_gives_up_once_data_has_flowed(resv, run, capsys):
+def test_never_gives_up_once_data_has_flowed(resv, stream, run, capsys):
     answers = [Response([NULL_PACKET * 4]), forbidden]
     tries, _ = run(answers, giveup=2, stop_after=8)
     assert tries == 8
-    assert resv.in_total == len(NULL_PACKET) * 4
+    assert stream.reservoir.in_total == len(NULL_PACKET) * 4
     assert "giving up" not in capsys.readouterr().err
 
 
@@ -151,7 +152,7 @@ def prefill(resv, monkeypatch):
         def popen(*_args, **_kwargs):
             raise FfmpegStarted
 
-        monkeypatch.setattr(resv, "fetcher", fetcher)
+        monkeypatch.setattr(resv.Upstream, "run", fetcher)
         monkeypatch.setattr(resv.subprocess, "Popen", popen)
         t0 = resv.time.monotonic()
         resv.main()
@@ -161,10 +162,8 @@ def prefill(resv, monkeypatch):
 
 
 def test_a_fetcher_that_gives_up_ends_the_prefill_at_once(resv, prefill, capsys):
-    def gives_up():
-        resv.upstream_eof = True
-        with resv.cond:
-            resv.cond.notify_all()
+    def gives_up(upstream):
+        upstream.reservoir.close()
 
     waited = prefill(gives_up)
     assert waited < 1.0
@@ -177,7 +176,7 @@ def test_data_still_releases_the_prefill_to_ffmpeg(resv, prefill, capsys):
     resv.PREFILL_BYTES = len(NULL_PACKET)
 
     with pytest.raises(FfmpegStarted):
-        prefill(lambda: resv.ingest(NULL_PACKET))
+        prefill(lambda upstream: upstream.ingest(NULL_PACKET))
     assert "prefill done" in capsys.readouterr().err
 
 
@@ -192,11 +191,11 @@ HLS_BODY = b"#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:6\nseg1.ts\n"
     b"  <html><head></head></html>",
     b'<?xml version="1.0"?><Error/>',
 ])
-def test_a_playlist_or_page_counts_as_an_attempt_without_data(resv, run, capsys, body):
+def test_a_playlist_or_page_counts_as_an_attempt_without_data(resv, stream, run, capsys, body):
     page = Response([body])
     tries, sleeps = run([page], giveup=1)
     assert tries == 1
-    assert resv.in_total == 0
+    assert stream.reservoir.in_total == 0
     assert page.closed is True
     err = capsys.readouterr().err
     assert "not a live TS; counted as an attempt without data" in err
@@ -210,11 +209,11 @@ def test_an_hls_playlist_log_line_points_to_the_readme(resv, run, capsys):
     assert "needs a raw MPEG-TS URL" in err
 
 
-def test_a_playlist_keeps_backing_off_instead_of_hammering_the_edge(resv, run):
+def test_a_playlist_keeps_backing_off_instead_of_hammering_the_edge(resv, stream, run):
     tries, sleeps = run([lambda *a, **k: Response([HLS_BODY])], giveup=0, stop_after=6)
     assert tries == 6
     assert sleeps == [1, 2, 4, 8, 8, 8]
-    assert resv.in_total == 0
+    assert stream.reservoir.in_total == 0
 
 
 def test_a_tiny_live_answer_no_longer_resets_the_backoff(resv, run):
@@ -232,11 +231,11 @@ def test_a_connection_that_carried_real_data_resets_the_backoff(resv, run):
     assert sleeps == [1, 2, 1, 2]
 
 
-def test_ts_that_starts_mid_packet_is_not_mistaken_for_a_page(resv, run):
+def test_ts_that_starts_mid_packet_is_not_mistaken_for_a_page(resv, stream, run):
     chunk = b"\n " + b"\xff" * 20 + NULL_PACKET * 3        # whitespace lead exercises the strip
     tries, _ = run([Response([chunk]), forbidden], giveup=1, stop_after=3)
     assert tries == 3
-    assert resv.in_total == len(chunk)
+    assert stream.reservoir.in_total == len(NULL_PACKET) * 3   # the lead before the first packet is dropped
 
 
 def test_one_full_read_chunk_resets_the_backoff(resv, run):

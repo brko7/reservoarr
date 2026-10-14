@@ -3,74 +3,73 @@ corrupt-loop flush. Each reconnect class is debounced independently (≤1 per 90
 per class) and the flush request is sticky (set by a flush caller, consumed by
 the fetcher).
 
-Ported from tmp/test_reconnect_precedence.py in superlab — the original ran in
-the dispatcharr container; here it runs against the standalone repo's
-reservoarr.py via the conftest fixture."""
+Ported from tmp/test_reconnect_precedence.py in superlab. Since 6.4.0 these
+drive the real Upstream.request_reconnect() / take_request() pair instead of a
+copy of the fetcher's flush block."""
 from __future__ import annotations
 
-
-def _fetcher_consume(mod):
-    """Mimic the fetcher's flush block: check force_reconnect, drain
-    flush_pending if set, clear the event. Returns True if it flushed, False
-    if it just reconnected, None if nothing to do."""
-    if not mod.force_reconnect.is_set():
-        return None
-    do_flush = mod.flush_pending
-    if do_flush:
-        mod.flush_pending = False
-    mod.force_reconnect.clear()
-    return do_flush
+import pytest
 
 
-def _reset(mod):
-    # -inf, matching the module's own init: debounces compare against
-    # time.monotonic(), which can be <90s shortly after boot — 0.0 would
-    # make these tests flake on a freshly booted CI runner.
-    mod.last_forced_flush = float("-inf")
-    mod.last_forced_stall = float("-inf")
-    mod.flush_pending = False
-    mod.force_reconnect.clear()
+@pytest.fixture
+def up(stream):
+    return stream.upstream
 
 
-def test_corrupt_only_fires_and_flushes(resv):
-    _reset(resv)
-    assert resv.force_upstream_reconnect("t:corrupt", flush=True) is True
-    assert _fetcher_consume(resv) is True
+def test_nothing_requested_takes_nothing(up):
+    assert up.take_request() is None
 
 
-def test_stall_only_fires_without_flush(resv):
-    _reset(resv)
-    assert resv.force_upstream_reconnect("t:stall", flush=False) is True
-    assert _fetcher_consume(resv) is False
+def test_corrupt_only_fires_and_flushes(up):
+    assert up.request_reconnect("t:corrupt", flush=True) is True
+    assert up.take_request() is True
 
 
-def test_corrupt_fires_despite_recent_stall(resv):
+def test_stall_only_fires_without_flush(up):
+    assert up.request_reconnect("t:stall", flush=False) is True
+    assert up.take_request() is False
+
+
+def test_corrupt_fires_despite_recent_stall(up):
     """F1: a stall (no-flush) within the 90s debounce window must NOT block
     a subsequent corrupt flush. Per-class debounce is the whole point."""
-    _reset(resv)
-    resv.force_upstream_reconnect("t:stall", flush=False)
-    _fetcher_consume(resv)
-    assert resv.force_upstream_reconnect("t:corrupt", flush=True) is True
-    assert _fetcher_consume(resv) is True
+    up.request_reconnect("t:stall", flush=False)
+    up.take_request()
+    assert up.request_reconnect("t:corrupt", flush=True) is True
+    assert up.take_request() is True
 
 
-def test_concurrent_stall_does_not_downgrade_flush(resv):
+def test_concurrent_stall_does_not_downgrade_flush(up):
     """Race: corrupt fires (sets flush_pending), stall fires before the fetcher
-    consumes. flush_pending must stay True; the eventual consume flushes."""
-    _reset(resv)
-    resv.force_upstream_reconnect("t:corrupt", flush=True)
-    resv.force_upstream_reconnect("t:stall", flush=False)
-    assert resv.flush_pending is True
-    assert _fetcher_consume(resv) is True
+    consumes. flush_pending must stay True; the eventual take flushes."""
+    up.request_reconnect("t:corrupt", flush=True)
+    up.request_reconnect("t:stall", flush=False)
+    assert up.flush_requested is True
+    assert up.take_request() is True
+    assert up.take_request() is None
 
 
-def test_two_corrupts_within_90s_second_debounced(resv):
-    _reset(resv)
-    resv.force_upstream_reconnect("t:c1", flush=True)
-    assert resv.force_upstream_reconnect("t:c2", flush=True) is False
+def test_two_corrupts_within_90s_second_debounced(up):
+    up.request_reconnect("t:c1", flush=True)
+    assert up.request_reconnect("t:c2", flush=True) is False
 
 
-def test_two_stalls_within_90s_second_debounced(resv):
-    _reset(resv)
-    resv.force_upstream_reconnect("t:s1", flush=False)
-    assert resv.force_upstream_reconnect("t:s2", flush=False) is False
+def test_two_stalls_within_90s_second_debounced(up):
+    up.request_reconnect("t:s1", flush=False)
+    assert up.request_reconnect("t:s2", flush=False) is False
+
+
+def test_the_debounce_starts_open_right_after_boot(up, resv, monkeypatch):
+    """The anchors are -inf: monotonic time can be under 90s after boot, and a
+    0.0 anchor would rate-limit the first forced reconnect then."""
+    monkeypatch.setattr(resv.time, "monotonic", lambda: 5.0)
+    assert up.request_reconnect("t:boot", flush=True) is True
+
+
+def test_a_third_identical_corrupt_dts_requests_a_flush(up):
+    up.register_corrupt(501541200)
+    up.register_corrupt(42)
+    up.register_corrupt(501541200)
+    assert up.take_request() is None
+    up.register_corrupt(501541200)
+    assert up.take_request() is True
