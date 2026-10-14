@@ -75,7 +75,7 @@ def test_anything_else_leaves_the_command_alone(tmp_path, raw):
 
 def test_invalid_value_is_logged_once(tmp_path, capsys):
     resv = load(tmp_path, RESV_AUDIO_LANG="francais")
-    resv.fetcher = lambda: setattr(resv, "upstream_eof", True)
+    resv.Upstream.run = lambda self: self.reservoir.close()
     resv.main()
     err = capsys.readouterr().err
     assert err.count("RESV_AUDIO_LANG='francais' is not a 3-letter code") == 1

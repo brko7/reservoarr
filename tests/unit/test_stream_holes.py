@@ -82,117 +82,117 @@ def stream(video_times, audio_times=None, **kwargs):
     return pat() + pmt() + b"".join(packet for _, packet in packets)
 
 
-def test_the_video_and_audio_pids_come_from_the_pmt(resv):
-    resv.parser.feed(pat() + pmt() + null_packet())
+def test_the_video_and_audio_pids_come_from_the_pmt(resv, parser):
+    parser.feed(pat() + pmt() + null_packet())
 
-    assert resv.parser.pmt_pid == PMT_PID
-    assert resv.parser.video.pid == VIDEO_PID
-    assert resv.parser.audio.pid == AUDIO_PID
+    assert parser.pmt_pid == PMT_PID
+    assert parser.video.pid == VIDEO_PID
+    assert parser.audio.pid == AUDIO_PID
 
 
-def test_private_data_with_an_ac3_descriptor_is_audio(resv):
+def test_private_data_with_an_ac3_descriptor_is_audio(resv, parser):
     descriptor = bytes([0x6A, 1, 0x00])
-    resv.parser.feed(pat() + pmt(elementary(0x1B, VIDEO_PID), elementary(0x06, AUDIO_PID, descriptor)) + null_packet())
+    parser.feed(pat() + pmt(elementary(0x1B, VIDEO_PID), elementary(0x06, AUDIO_PID, descriptor)) + null_packet())
 
-    assert resv.parser.audio.pid == AUDIO_PID
+    assert parser.audio.pid == AUDIO_PID
 
 
-def test_private_data_without_an_audio_descriptor_is_not_audio(resv):
+def test_private_data_without_an_audio_descriptor_is_not_audio(resv, parser):
     descriptor = bytes([0x59, 1, 0x00])
-    resv.parser.feed(pat() + pmt(elementary(0x1B, VIDEO_PID), elementary(0x06, AUDIO_PID, descriptor)) + null_packet())
+    parser.feed(pat() + pmt(elementary(0x1B, VIDEO_PID), elementary(0x06, AUDIO_PID, descriptor)) + null_packet())
 
-    assert resv.parser.audio.pid is None
-
-
-def test_a_continuous_stream_has_no_holes(resv):
-    resv.parser.feed(stream(frames(100, 115), audio_frames(100, 115)))
-
-    assert resv.parser.take_holes_pct() == (0, 0)
+    assert parser.audio.pid is None
 
 
-def test_four_seconds_missing_out_of_eight_is_about_half(resv):
+def test_a_continuous_stream_has_no_holes(resv, parser):
+    parser.feed(stream(frames(100, 115), audio_frames(100, 115)))
+
+    assert parser.take_holes_pct() == (0, 0)
+
+
+def test_four_seconds_missing_out_of_eight_is_about_half(resv, parser):
     video = [t for t in frames(100, 132) if (t - 100) % 8 < 4]
     audio = [t for t in audio_frames(100, 132) if (t - 100) % 8 < 4]
-    resv.parser.feed(stream(video, audio))
+    parser.feed(stream(video, audio))
 
-    video_pct, audio_pct = resv.parser.take_holes_pct()
+    video_pct, audio_pct = parser.take_holes_pct()
     assert 40 <= video_pct <= 50
     assert 40 <= audio_pct <= 50
 
 
-def test_audio_holes_are_told_apart_from_video_holes(resv):
+def test_audio_holes_are_told_apart_from_video_holes(resv, parser):
     audio = [t for t in audio_frames(100, 110) if not 104 <= t < 106]
-    resv.parser.feed(stream(frames(100, 110), audio))
+    parser.feed(stream(frames(100, 110), audio))
 
-    video_pct, audio_pct = resv.parser.take_holes_pct()
+    video_pct, audio_pct = parser.take_holes_pct()
     assert video_pct == 0
     assert audio_pct == 20
 
 
-def test_audio_that_disappears_while_the_video_runs_is_all_missing(resv):
-    resv.parser.feed(stream(frames(100, 110), audio_frames(100, 110)))
-    resv.parser.take_holes_pct()
+def test_audio_that_disappears_while_the_video_runs_is_all_missing(resv, parser):
+    parser.feed(stream(frames(100, 110), audio_frames(100, 110)))
+    parser.take_holes_pct()
 
-    resv.parser.feed(b"".join(video_pes(t) for t in frames(110, 125)))
+    parser.feed(b"".join(video_pes(t) for t in frames(110, 125)))
 
-    assert resv.parser.take_holes_pct() == (0, 100)
-
-
-def test_video_that_disappears_while_the_audio_runs_is_all_missing(resv):
-    resv.parser.feed(stream(frames(100, 110), audio_frames(100, 110)))
-    resv.parser.take_holes_pct()
-
-    resv.parser.feed(b"".join(audio_pes(t) for t in audio_frames(110, 125)))
-
-    assert resv.parser.take_holes_pct() == (100, 0)
+    assert parser.take_holes_pct() == (0, 100)
 
 
-def test_a_source_without_audio_is_not_reported_as_missing_it(resv):
-    resv.parser.feed(pat() + pmt(elementary(0x1B, VIDEO_PID)) + b"".join(video_pes(t) for t in frames(100, 110)))
+def test_video_that_disappears_while_the_audio_runs_is_all_missing(resv, parser):
+    parser.feed(stream(frames(100, 110), audio_frames(100, 110)))
+    parser.take_holes_pct()
 
-    assert resv.parser.take_holes_pct() == (0, 0)
+    parser.feed(b"".join(audio_pes(t) for t in audio_frames(110, 125)))
 
-
-def test_the_window_resets_after_each_read(resv):
-    resv.parser.feed(stream(frames(100, 104) + frames(106, 110)))
-    assert resv.parser.take_holes_pct()[0] > 0
-
-    resv.parser.feed(stream(frames(110, 125))[376:])
-
-    assert resv.parser.take_holes_pct() == (0, 0)
+    assert parser.take_holes_pct() == (100, 0)
 
 
-def test_pts_is_used_when_there_is_no_dts(resv):
-    resv.parser.feed(stream(frames(100, 104) + frames(106, 110), audio_times=[], with_dts=False))
+def test_a_source_without_audio_is_not_reported_as_missing_it(resv, parser):
+    parser.feed(pat() + pmt(elementary(0x1B, VIDEO_PID)) + b"".join(video_pes(t) for t in frames(100, 110)))
 
-    assert resv.parser.take_holes_pct()[0] == 20
-
-
-def test_a_reconnect_seam_is_not_a_hole(resv):
-    resv.parser.feed(stream(frames(100, 110)))
-    resv.parser.on_reconnect()
-    resv.parser.feed(stream(frames(130, 140))[376:])
-
-    assert resv.parser.take_holes_pct() == (0, 0)
+    assert parser.take_holes_pct() == (0, 0)
 
 
-def test_a_flagged_discontinuity_is_not_a_hole(resv):
-    resv.parser.feed(stream(frames(100, 110), audio_times=[]))
-    resv.parser.feed(video_pes(200, discontinuity=True) + b"".join(video_pes(t) for t in frames(200.04, 210)))
+def test_the_window_resets_after_each_read(resv, parser):
+    parser.feed(stream(frames(100, 104) + frames(106, 110)))
+    assert parser.take_holes_pct()[0] > 0
 
-    assert resv.parser.take_holes_pct()[0] == 0
+    parser.feed(stream(frames(110, 125))[376:])
 
-
-def test_a_far_jump_is_not_a_hole(resv):
-    resv.parser.feed(stream(frames(100, 110) + frames(400, 410)))
-
-    assert resv.parser.take_holes_pct() == (0, 0)
+    assert parser.take_holes_pct() == (0, 0)
 
 
-def test_nothing_seen_reads_zero(resv):
-    resv.parser.feed(pat() + pmt() + null_packet())
+def test_pts_is_used_when_there_is_no_dts(resv, parser):
+    parser.feed(stream(frames(100, 104) + frames(106, 110), audio_times=[], with_dts=False))
 
-    assert resv.parser.take_holes_pct() == (0, 0)
+    assert parser.take_holes_pct()[0] == 20
+
+
+def test_a_reconnect_seam_is_not_a_hole(resv, parser):
+    parser.feed(stream(frames(100, 110)))
+    parser.on_reconnect()
+    parser.feed(stream(frames(130, 140))[376:])
+
+    assert parser.take_holes_pct() == (0, 0)
+
+
+def test_a_flagged_discontinuity_is_not_a_hole(resv, parser):
+    parser.feed(stream(frames(100, 110), audio_times=[]))
+    parser.feed(video_pes(200, discontinuity=True) + b"".join(video_pes(t) for t in frames(200.04, 210)))
+
+    assert parser.take_holes_pct()[0] == 0
+
+
+def test_a_far_jump_is_not_a_hole(resv, parser):
+    parser.feed(stream(frames(100, 110) + frames(400, 410)))
+
+    assert parser.take_holes_pct() == (0, 0)
+
+
+def test_nothing_seen_reads_zero(resv, parser):
+    parser.feed(pat() + pmt() + null_packet())
+
+    assert parser.take_holes_pct() == (0, 0)
 
 
 def without(data, pid, start_s, end_s, resv, period_s=None):
@@ -219,46 +219,46 @@ def fixture_bytes():
     return FIXTURE.read_bytes()[: 188 * 60000]
 
 
-def test_the_synthetic_fixture_has_no_holes(resv):
-    resv.parser.feed(fixture_bytes())
+def test_the_synthetic_fixture_has_no_holes(resv, parser):
+    parser.feed(fixture_bytes())
 
-    assert resv.parser.video.pid == VIDEO_PID
-    assert resv.parser.audio.pid == AUDIO_PID
-    assert resv.parser.take_holes_pct() == (0, 0)
+    assert parser.video.pid == VIDEO_PID
+    assert parser.audio.pid == AUDIO_PID
+    assert parser.take_holes_pct() == (0, 0)
 
 
-def test_dropping_six_seconds_of_video_from_the_fixture_shows_up(resv):
-    resv.parser.feed(without(fixture_bytes(), VIDEO_PID, 10, 16, resv))
+def test_dropping_six_seconds_of_video_from_the_fixture_shows_up(resv, parser):
+    parser.feed(without(fixture_bytes(), VIDEO_PID, 10, 16, resv))
 
-    video_pct, audio_pct = resv.parser.take_holes_pct()
+    video_pct, audio_pct = parser.take_holes_pct()
     assert video_pct >= 10
     assert audio_pct == 0
 
 
-def test_dropping_audio_four_seconds_in_eight_from_the_fixture_shows_up(resv):
-    resv.parser.feed(without(fixture_bytes(), AUDIO_PID, 4, 8, resv, period_s=8))
+def test_dropping_audio_four_seconds_in_eight_from_the_fixture_shows_up(resv, parser):
+    parser.feed(without(fixture_bytes(), AUDIO_PID, 4, 8, resv, period_s=8))
 
-    video_pct, audio_pct = resv.parser.take_holes_pct()
+    video_pct, audio_pct = parser.take_holes_pct()
     assert video_pct == 0
     assert audio_pct >= 30
 
 
-def test_a_sliver_of_video_without_audio_is_not_missing_sound(resv):
-    resv.parser.feed(stream(frames(100, 110), audio_frames(100, 110)))
-    resv.parser.take_holes_pct()
+def test_a_sliver_of_video_without_audio_is_not_missing_sound(resv, parser):
+    parser.feed(stream(frames(100, 110), audio_frames(100, 110)))
+    parser.take_holes_pct()
 
-    resv.parser.feed(b"".join(video_pes(t) for t in frames(110, 112)))
+    parser.feed(b"".join(video_pes(t) for t in frames(110, 112)))
 
-    assert resv.parser.take_holes_pct() == (0, 0)
+    assert parser.take_holes_pct() == (0, 0)
 
 
-def test_five_seconds_of_video_without_audio_is_missing_sound(resv):
-    resv.parser.feed(stream(frames(100, 110), audio_frames(100, 110)))
-    resv.parser.take_holes_pct()
+def test_five_seconds_of_video_without_audio_is_missing_sound(resv, parser):
+    parser.feed(stream(frames(100, 110), audio_frames(100, 110)))
+    parser.take_holes_pct()
 
-    resv.parser.feed(b"".join(video_pes(t) for t in frames(110, 116)))
+    parser.feed(b"".join(video_pes(t) for t in frames(110, 116)))
 
-    assert resv.parser.take_holes_pct() == (0, 100)
+    assert parser.take_holes_pct() == (0, 100)
 
 
 PCR_PID = 0x1FF
@@ -289,78 +289,78 @@ def long_pmt_streams():
     return elementary(0x1B, VIDEO_PID, padding), elementary(0x0F, AUDIO_PID)
 
 
-def test_a_pmt_spanning_two_packets_is_put_back_together(resv):
+def test_a_pmt_spanning_two_packets_is_put_back_together(resv, parser):
     first, second = split_pmt(*long_pmt_streams())
 
-    resv.parser.feed(pat() + first + second + null_packet())
+    parser.feed(pat() + first + second + null_packet())
 
-    assert resv.parser.video.pid == VIDEO_PID
-    assert resv.parser.audio.pid == AUDIO_PID
+    assert parser.video.pid == VIDEO_PID
+    assert parser.audio.pid == AUDIO_PID
 
 
-def test_a_cut_off_pmt_clears_nothing(resv):
-    resv.parser.feed(pat() + pmt() + null_packet())
+def test_a_cut_off_pmt_clears_nothing(resv, parser):
+    parser.feed(pat() + pmt() + null_packet())
     first, _ = split_pmt(elementary(0x1B, VIDEO_PID, bytes([0x05, 200]) + b"\x00" * 200))
 
-    resv.parser.feed(first + null_packet() + null_packet())
+    parser.feed(first + null_packet() + null_packet())
 
-    assert resv.parser.audio.pid == AUDIO_PID
-
-
-def test_a_track_the_pmt_drops_is_forgotten(resv):
-    resv.parser.feed(stream(frames(100, 110), audio_frames(100, 110)))
-    resv.parser.take_holes_pct()
-
-    resv.parser.feed(pmt(elementary(0x1B, VIDEO_PID)) + b"".join(video_pes(t) for t in frames(110, 125)))
-
-    assert resv.parser.audio.pid is None
-    assert resv.parser.take_holes_pct() == (0, 0)
+    assert parser.audio.pid == AUDIO_PID
 
 
-def test_a_discontinuity_on_the_pcr_pid_covers_the_jump_on_both_tracks(resv):
-    resv.parser.feed(pcr_packet(100) + stream(frames(100, 110), audio_frames(100, 110)) + pcr_packet(110))
-    resv.parser.take_holes_pct()
+def test_a_track_the_pmt_drops_is_forgotten(resv, parser):
+    parser.feed(stream(frames(100, 110), audio_frames(100, 110)))
+    parser.take_holes_pct()
+
+    parser.feed(pmt(elementary(0x1B, VIDEO_PID)) + b"".join(video_pes(t) for t in frames(110, 125)))
+
+    assert parser.audio.pid is None
+    assert parser.take_holes_pct() == (0, 0)
+
+
+def test_a_discontinuity_on_the_pcr_pid_covers_the_jump_on_both_tracks(resv, parser):
+    parser.feed(pcr_packet(100) + stream(frames(100, 110), audio_frames(100, 110)) + pcr_packet(110))
+    parser.take_holes_pct()
     after = sorted([(t, video_pes(t)) for t in frames(113, 123)] + [(t, audio_pes(t)) for t in audio_frames(113, 123)])
 
-    resv.parser.feed(pcr_packet(500, discontinuity=True) + b"".join(packet for _, packet in after))
+    parser.feed(pcr_packet(500, discontinuity=True) + b"".join(packet for _, packet in after))
 
-    assert resv.parser.take_holes_pct() == (0, 0)
+    assert parser.take_holes_pct() == (0, 0)
 
 
-def test_the_same_jump_without_the_flag_is_a_hole(resv):
-    resv.parser.feed(pcr_packet(100) + stream(frames(100, 110), audio_frames(100, 110)) + pcr_packet(110))
-    resv.parser.take_holes_pct()
+def test_the_same_jump_without_the_flag_is_a_hole(resv, parser):
+    parser.feed(pcr_packet(100) + stream(frames(100, 110), audio_frames(100, 110)) + pcr_packet(110))
+    parser.take_holes_pct()
     after = sorted([(t, video_pes(t)) for t in frames(113, 123)] + [(t, audio_pes(t)) for t in audio_frames(113, 123)])
 
-    resv.parser.feed(pcr_packet(110.5) + b"".join(packet for _, packet in after))
+    parser.feed(pcr_packet(110.5) + b"".join(packet for _, packet in after))
 
-    video_pct, audio_pct = resv.parser.take_holes_pct()
+    video_pct, audio_pct = parser.take_holes_pct()
     assert video_pct > 0
     assert audio_pct > 0
 
 
-def test_reading_the_window_waits_for_the_lock(resv):
+def test_reading_the_window_waits_for_the_lock(resv, parser):
     import threading
     done = threading.Event()
-    resv.parser.holes_lock.acquire()
-    reader = threading.Thread(target=lambda: (resv.parser.take_holes_pct(), done.set()))
+    parser.holes_lock.acquire()
+    reader = threading.Thread(target=lambda: (parser.take_holes_pct(), done.set()))
     reader.start()
 
     assert not done.wait(0.2)
-    resv.parser.holes_lock.release()
+    parser.holes_lock.release()
     assert done.wait(2)
 
 
-def test_counting_a_timestamp_waits_for_the_lock(resv):
+def test_counting_a_timestamp_waits_for_the_lock(resv, parser):
     import threading
-    resv.parser.feed(pat() + pmt() + null_packet())
+    parser.feed(pat() + pmt() + null_packet())
     done = threading.Event()
-    resv.parser.holes_lock.acquire()
-    feeder = threading.Thread(target=lambda: (resv.parser.feed(b"".join(video_pes(t) for t in frames(100, 101))), done.set()))
+    parser.holes_lock.acquire()
+    feeder = threading.Thread(target=lambda: (parser.feed(b"".join(video_pes(t) for t in frames(100, 101))), done.set()))
     feeder.start()
 
     assert not done.wait(0.2)
-    resv.parser.holes_lock.release()
+    parser.holes_lock.release()
     assert done.wait(2)
 
 
@@ -382,28 +382,28 @@ def split_video_pes(seconds, first_bytes=10):
     return first + second
 
 
-def test_a_pmt_for_the_next_mapping_is_not_applied(resv):
-    resv.parser.feed(pat() + pmt() + null_packet())
+def test_a_pmt_for_the_next_mapping_is_not_applied(resv, parser):
+    parser.feed(pat() + pmt() + null_packet())
 
-    resv.parser.feed(pmt_not_yet_current(elementary(0x1B, 0x200), elementary(0x0F, 0x201)) + null_packet() + null_packet())
+    parser.feed(pmt_not_yet_current(elementary(0x1B, 0x200), elementary(0x0F, 0x201)) + null_packet() + null_packet())
 
-    assert resv.parser.video.pid == VIDEO_PID
-    assert resv.parser.audio.pid == AUDIO_PID
-
-
-def test_a_pes_header_split_over_two_packets_is_still_read(resv):
-    resv.parser.feed(pat() + pmt(elementary(0x1B, VIDEO_PID)) + null_packet())
-
-    resv.parser.feed(b"".join(split_video_pes(t) for t in frames(100, 104) + frames(106, 110)))
-
-    assert resv.parser.take_holes_pct() == (20, 0)
+    assert parser.video.pid == VIDEO_PID
+    assert parser.audio.pid == AUDIO_PID
 
 
-def test_a_reconnect_drops_a_half_read_pes_header(resv):
-    resv.parser.feed(pat() + pmt(elementary(0x1B, VIDEO_PID)) + null_packet())
-    resv.parser.feed(split_video_pes(100)[:188] + null_packet() + null_packet())
-    assert resv.parser.video.head is not None
+def test_a_pes_header_split_over_two_packets_is_still_read(resv, parser):
+    parser.feed(pat() + pmt(elementary(0x1B, VIDEO_PID)) + null_packet())
 
-    resv.parser.on_reconnect()
+    parser.feed(b"".join(split_video_pes(t) for t in frames(100, 104) + frames(106, 110)))
 
-    assert resv.parser.video.head is None
+    assert parser.take_holes_pct() == (20, 0)
+
+
+def test_a_reconnect_drops_a_half_read_pes_header(resv, parser):
+    parser.feed(pat() + pmt(elementary(0x1B, VIDEO_PID)) + null_packet())
+    parser.feed(split_video_pes(100)[:188] + null_packet() + null_packet())
+    assert parser.video.head is not None
+
+    parser.on_reconnect()
+
+    assert parser.video.head is None

@@ -181,10 +181,10 @@ Pacing happens in the wrapper, not in ffmpeg. The reservoir fetches upstream byt
 
 Why pace here and not with `ffmpeg -re`: the provider's streams carry occasional corrupt packets with garbage DTS values, and `-re` sleeps on them (observed 25s output freeze with a full reservoir). PCR is a *measurement* input — a garbage sample is rejected by a plausibility window and the chain re-anchors.
 
-Three watchdogs ride alongside:
+Three watchdogs ride alongside (and if ffmpeg dies on its own, the stream ends so Dispatcharr can retry):
 
 - **Corrupt-loop** (ffmpeg-stderr-side, default armed): same `dts` reported 3× → reconnect + flush.
-- **Stall** (#4, default armed): no ingest progress for `RESV_STALL_S` → reconnect WITHOUT flushing.
+- **Stall** (#4, default armed): no ingest progress for `RESV_STALL_S` → cut the silent connection and reconnect WITHOUT flushing.
 - **TS corruption** (#5, default log-only): sustained CC/sync errors while bytes flow → reconnect + flush, when `RESV_TS_RECONNECT=1`.
 
 Deeper reading:

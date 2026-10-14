@@ -1,7 +1,7 @@
 """#5 ingest-side TS-corruption detector: replay the rule against the real
 2026-06-14 incident signature, plus baselines and clean reconnect/gap seams.
 
-The rule (per reservoarr.py main()'s stats loop):
+The rule (CorruptionDetector.window(), once per stats window):
   if ingest_adv > 0 and (dccerr >= 3 or dsync >= 2):
       bad_wins += 1
   else:
@@ -16,19 +16,17 @@ Ported from tmp/test_ts_detector.py in superlab. Asserts:
 from __future__ import annotations
 
 
-def fires(windows, cc_th=3, sync_th=2, sustain=2):
-    """windows: list of (dccerr, dsync, ingest_adv). Returns the indices where
-    the rule trips. Mirrors reservoarr.py exactly: reset bad_wins after firing."""
-    bad = 0
+def fires(resv, windows):
+    """windows: list of per-window (dccerr, dsync, ingest_adv). Feeds the real
+    CorruptionDetector the cumulative counters the stats loop hands it and
+    returns the indices where the rule trips."""
+    det = resv.CorruptionDetector()
+    cc = sy = total = 0
     out = []
     for i, (dcc, dsy, adv) in enumerate(windows):
-        if adv > 0 and (dcc >= cc_th or dsy >= sync_th):
-            bad += 1
-        else:
-            bad = 0
-        if bad >= sustain:
+        cc, sy, total = cc + dcc, sy + dsy, total + adv
+        if det.window(cc, sy, total) is not None:
             out.append(i)
-            bad = 0
     return out
 
 
@@ -40,9 +38,9 @@ INCIDENT = [(5, 2), (10, 2), (5, 1), (0, 1), (5, 2), (10, 2),
             (10, 2), (0, 1), (5, 0), (0, 0), (0, 0), (0, 0)]
 
 
-def test_fires_30s_before_stderr_on_real_incident():
+def test_fires_30s_before_stderr_on_real_incident(resv):
     windows = [(dcc, dsy, 1) for (dcc, dsy) in INCIDENT]
-    indices = fires(windows)
+    indices = fires(resv, windows)
     assert indices, "rule never fired on the real incident"
     first_label = LABELS[indices[0]]
     assert first_label == "08:03:48", (
@@ -50,29 +48,35 @@ def test_fires_30s_before_stderr_on_real_incident():
     )
 
 
-def test_no_false_positives_on_clean_baseline():
+def test_no_false_positives_on_clean_baseline(resv):
     """20 windows of zero errors with bytes flowing — the production baseline."""
-    assert fires([(0, 0, 1)] * 20) == []
+    assert fires(resv, [(0, 0, 1)] * 20) == []
 
 
-def test_no_false_positives_on_clean_reconnect_seam():
+def test_no_false_positives_on_clean_reconnect_seam(resv):
     """A clean reconnect resets PCR but leaves CC/sync flat-zero; calibrated
     on 2026-06-14 evidence. This is the critical false-positive guard."""
-    assert fires([(0, 0, 1)] * 5) == []
+    assert fires(resv, [(0, 0, 1)] * 5) == []
 
 
-def test_no_false_positives_on_clean_cdn_gap():
+def test_no_false_positives_on_clean_cdn_gap(resv):
     """CDN burst-gap: no errors AND no ingest advance. ingest_adv > 0 gate
     prevents these from being counted as bad windows."""
-    assert fires([(0, 0, 0)] * 5) == []
+    assert fires(resv, [(0, 0, 0)] * 5) == []
 
 
-def test_single_bad_window_does_not_fire():
+def test_single_bad_window_does_not_fire(resv):
     """sustain=2: a one-shot burst with a clean window before/after must not fire."""
-    assert fires([(0, 0, 1), (5, 0, 1), (0, 0, 1)]) == []
+    assert fires(resv, [(0, 0, 1), (5, 0, 1), (0, 0, 1)]) == []
 
 
-def test_sync_loss_only_can_fire():
+def test_sync_loss_only_can_fire(resv):
     """The OR-gate: 2 sync losses per window for 2 windows fires even with
     zero CC errors."""
-    assert fires([(0, 2, 1), (0, 2, 1)]) == [1]
+    assert fires(resv, [(0, 2, 1), (0, 2, 1)]) == [1]
+
+
+def test_the_detail_names_the_window(resv):
+    det = resv.CorruptionDetector()
+    assert det.window(5, 0, 100) is None
+    assert det.window(15, 1, 200) == "+10 ccerr/+1 sync this window x2 windows"

@@ -32,6 +32,10 @@ def load(tmp_log_dir, **env):
     return mod
 
 
+def ignore(_dts):
+    pass
+
+
 class FakeFfmpeg:
     def __init__(self, chunks):
         read_fd, write_fd = os.pipe()
@@ -48,7 +52,7 @@ def test_stats_flag_is_opt_in(tmp_path):
 def test_progress_lines_reach_stderr_split_on_cr(tmp_path, capsys):
     resv = load(tmp_path, RESV_FFMPEG_STATS="1")
 
-    resv.stderr_watcher(FakeFfmpeg([PROGRESS + PROGRESS, b"[mpegts @ 0x1] pes packet size mismatch\n"]))
+    resv.stderr_watcher(FakeFfmpeg([PROGRESS + PROGRESS, b"[mpegts @ 0x1] pes packet size mismatch\n"]), ignore)
 
     err = capsys.readouterr().err
     assert err.count("speed=0.25x") == 2
@@ -58,7 +62,7 @@ def test_progress_lines_reach_stderr_split_on_cr(tmp_path, capsys):
 def test_progress_lines_stay_out_of_the_journal(tmp_path, capsys):
     resv = load(tmp_path, RESV_FFMPEG_STATS="1")
 
-    resv.stderr_watcher(FakeFfmpeg([PROGRESS, b"[mpegts @ 0x1] pes packet size mismatch\n"]))
+    resv.stderr_watcher(FakeFfmpeg([PROGRESS, b"[mpegts @ 0x1] pes packet size mismatch\n"]), ignore)
     capsys.readouterr()
 
     journal = Path(resv.LOG_FILE).read_text()
@@ -71,7 +75,7 @@ def test_last_line_without_a_terminator_still_arrives(tmp_path, capsys):
     the way out arrives exactly that way, so the split loop must flush it too."""
     resv = load(tmp_path, RESV_FFMPEG_STATS="1")
 
-    resv.stderr_watcher(FakeFfmpeg([b"Conversion failed!"]))
+    resv.stderr_watcher(FakeFfmpeg([b"Conversion failed!"]), ignore)
 
     assert "Conversion failed!" in capsys.readouterr().err
     assert "Conversion failed!" in Path(resv.LOG_FILE).read_text()
@@ -80,9 +84,8 @@ def test_last_line_without_a_terminator_still_arrives(tmp_path, capsys):
 def test_corruption_detector_still_sees_its_line(tmp_path, capsys):
     resv = load(tmp_path, RESV_FFMPEG_STATS="1")
     seen = []
-    resv.register_corrupt = lambda dts: seen.append(dts)
 
-    resv.stderr_watcher(FakeFfmpeg([PROGRESS + b"Packet corrupt (stream = 0, dts = 501541200).\n"]))
+    resv.stderr_watcher(FakeFfmpeg([PROGRESS + b"Packet corrupt (stream = 0, dts = 501541200).\n"]), seen.append)
     capsys.readouterr()
 
     assert seen == [501541200]

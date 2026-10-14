@@ -48,9 +48,7 @@ def main():
     p = mod.TsParser()
     t0 = time.time()
     for i in range(0, len(data), mod.CHUNK):
-        c = data[i:i + mod.CHUNK]
-        mod.in_total += len(c)                                # the parser keys cushion marks on this global
-        p.feed(c)
+        p.feed(data[i:i + mod.CHUNK])
     dt = time.time() - t0
 
     rate = p.content_rate()

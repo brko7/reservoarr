@@ -5,13 +5,10 @@ from __future__ import annotations
 
 
 def feed_file(parser, mod, path, chunk=188 * 512):
-    """Replay a TS file through the parser the way the fetcher would, advancing
-    the module's in_total global so cushion marks land correctly."""
+    """Replay a TS file through the parser the way the fetcher would."""
     data = path.read_bytes()
     for i in range(0, len(data), chunk):
-        c = data[i:i + chunk]
-        mod.in_total += len(c)
-        parser.feed(c)
+        parser.feed(data[i:i + chunk])
     return data
 
 
@@ -59,15 +56,15 @@ def test_cushion_s_shrinks_as_released(resv, synth_ts):
     if the released cursor is before the first PCR mark (pre-lock seam)."""
     p = resv.TsParser()
     feed_file(p, resv, synth_ts)
-    # The first cushion mark sits at the in_total of the first valid PCR delta —
+    # The first cushion mark sits at the byte count of the first valid PCR delta —
     # not zero (a few packets of PMT/PAT precede the first PCR). Use that as
     # the "released nothing past first mark" baseline.
     first_mark_in_total = p.cush_marks[0][0]
     full = p.cushion_s(first_mark_in_total)
-    half = p.cushion_s(resv.in_total // 2)
-    near_end = p.cushion_s(resv.in_total)
+    half = p.cushion_s(p.fed // 2)
+    near_end = p.cushion_s(p.fed)
     assert full is not None and full > 170, f"full cushion={full}"
-    # Allow some slack: cushion is keyed to (in_total, cum_pcr) marks, not exact bytes.
+    # Allow some slack: cushion is keyed to (fed, cum_pcr) marks, not exact bytes.
     assert half is not None and 50 < half < full, f"half={half} full={full}"
     assert near_end is None or near_end < 5, f"near_end={near_end}"
 

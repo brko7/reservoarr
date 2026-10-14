@@ -1,6 +1,6 @@
 # Telemetry
 
-`{RESV_LOG_DIR}/delaybuf.log` (self-rotates at 10 MB, keeps one `.1`; checked at stream start and every ~512 log lines while running). One stats line every 15s per active stream, plus lifecycle events.
+`{RESV_LOG_DIR}/delaybuf.log` (self-rotates at 10 MB, keeps one `.1`; checked at stream start and every ~512 log lines while running). One stats line every 15s per active stream — also while the reservoir is empty (6.4.0; before, an outage that drained it went silent) — plus lifecycle events.
 
 ## Stats line
 
@@ -15,7 +15,7 @@
 | `out=…Mbps` | Output byte rate to ffmpeg. |
 | `in=…Mbps` | Byte rate ingested from upstream. It is also the pacing reference while PCR is unlocked, so a replay dropped by `RESV_REPLAY_SKIP` is not counted. |
 | `crate=…Mbps` | PCR-derived content rate (the pacing reference). |
-| `in_total=…MB` | Lifetime bytes ingested. Bytes dropped by `RESV_REPLAY_SKIP` are not counted. |
+| `in_total=…MB` | Lifetime bytes ingested. Bytes dropped by `RESV_REPLAY_SKIP`, and the partial packets dropped at a connection seam, are not counted. |
 | `reconnects=N` | Upstream reconnects this session. |
 | `ccerr/pcrrej/disc/sync` | TS continuity-counter errors / rejected PCR samples (garbage timestamps) / spec-legal discontinuities / sync losses. Healthy = flat zero. |
 | `pcr_back=N` | Backward PCR jumps > 0.5s (CDN overlap-replay signal — provider re-served N seconds of content). Each event also emits a `pcr backward jump: -Xs (last=… cur=…)` log line. Log-only; pacing is unchanged. Healthy = flat zero. |
@@ -27,10 +27,12 @@ Same file, free-form lines:
 
 | Event | When |
 |---|---|
-| `upstream connected edge=<host>` | Each successful upstream HTTP connect. Includes the CDN edge host so you can correlate problems with a specific edge. |
-| `upstream EOF` | Upstream closed the connection cleanly. |
+| `upstream connected edge=<host>` | Each successful upstream HTTP connect. Includes the CDN edge `host[:port]` so you can correlate problems with a specific edge; any `user:password@` in the URL is left out (6.4.0). |
+| `upstream EOF` | Upstream closed the connection cleanly. Not logged when a forced reconnect cut the connection. |
+| `upstream connection ended: dropped AB before its first TS packet and BB of an unfinished last packet` | 6.4.0: the connection started (A) or ended (B) mid-packet. Those bytes are kept out of the reservoir, so the writes to ffmpeg stay on the 188-byte grid across the seam. File only. Seen on every reconnect means the edge cuts connections mid-packet; harmless either way. |
+| `upstream connection: no TS sync in its first NKB; passing it on unaligned` | The connection's first chunk holds no MPEG-TS at all; it goes to ffmpeg as before 6.4.0, padded with `0xFF` to the next packet boundary when the connection ends, and ffmpeg's own error follows. Set `RESV_REJECT_MP4=1` if it is a provider's MP4 clip. |
 | `upstream error <type>: <msg>; retry in Ns` | Upstream read/connect failed; exponential backoff active. |
-| `upstream stalled (no data Ns) - reconnecting, buffer kept` | #4 watchdog: no byte has arrived from upstream for `RESV_STALL_S`; reconnect WITHOUT flushing. A replay being dropped by `RESV_REPLAY_SKIP` counts as arriving, so a slow replay never trips it. |
+| `upstream stalled (no data Ns) - reconnecting, buffer kept` | #4 watchdog: no byte has arrived from upstream for `RESV_STALL_S`; reconnect WITHOUT flushing. Since 6.4.0 a silent connection is cut at once; before, the reconnect waited for the 30s socket timeout. A connect that hangs before the first byte still waits out urlopen's 30s. A replay being dropped by `RESV_REPLAY_SKIP` counts as arriving, so a slow replay never trips it; a full reservoir (`RESV_MAX_BYTES`, reading paused on purpose) is not a stall. |
 | `corrupt-loop detected in stream (dts=N x3) - forcing upstream reconnect + buffer flush` | ffmpeg-stderr-side detector: same `dts` reported 3× in 120s. |
 | `TS corruption detected (...)` | #5 ingest-side detector, ARMED (`RESV_TS_RECONNECT=1`). |
 | `would-fire: TS corruption detected (...)` | #5 ingest-side detector, log-only (`RESV_TS_RECONNECT=0` — default). |
@@ -46,6 +48,7 @@ Same file, free-form lines:
 | `no data before the fetcher gave up (Ns); exiting without ffmpeg` | `RESV_GIVEUP_TRIES` fired before any byte arrived: the process ends here, without the prefill wait and without ffmpeg, so Dispatcharr counts the failed attempt at once. |
 | `upstream sent an MP4 file, not a live TS; counted as an attempt without data` | `RESV_REJECT_MP4=1` and the edge answered with an MP4 file: nothing was ingested from this connection. With `RESV_GIVEUP_TRIES` set, `giving up` follows. |
 | `upstream sent an HLS playlist, not a live TS; counted as an attempt without data` (or `an HTML page` / `an XML document`) | Always on (6.3.9): the edge answered with something ffmpeg can never play as live TS — typically the stream URL is an `.m3u8` playlist or the edge returned an error page. Nothing was ingested; the backoff keeps growing. With `RESV_GIVEUP_TRIES` set, `giving up` follows. For an HLS playlist the line adds `(reservoarr needs a raw MPEG-TS URL, see README)`. |
+| `ffmpeg exited on its own (rc=N); shutting down` | 6.4.0: ffmpeg ended without being asked to (OOM kill, crash, or its output pipe closed under it); the process ends so Dispatcharr can retry or fail over. `rc=-9` is a SIGKILL. Before, with the reservoir empty, nothing noticed and the channel sat on dead air. |
 | `stream wrapper exit (ffmpeg rc=N)` | Final line on shutdown. |
 
 ## What healthy looks like
