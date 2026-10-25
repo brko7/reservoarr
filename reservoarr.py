@@ -66,7 +66,18 @@ PREFILL_MAX_S = float(os.getenv("RESV_PREFILL_MAX_S", "3"))           # sniff on
 MAX_BYTES = int(os.getenv("RESV_MAX_BYTES", str(256 * 1024 * 1024)))  # reservoir hard cap
 HEADSTART_S = float(os.getenv("RESV_HEADSTART_S", "5"))               # content-seconds released unpaced at start
 TARGET_S = float(os.getenv("RESV_TARGET_S", "30"))                    # reservoir level to hold
-GRACE_S = float(os.getenv("RESV_GRACE_S", "45"))                     # release floor 1.0 this long (see main)
+GRACE_S = float(os.getenv("RESV_GRACE_S", "45"))                     # floor 1.0 this long, then FLOOR (see release_factor)
+# Lowest release rate, as a multiple of the content rate, once GRACE_S is over.
+# Under 1.0 the reservoir banks content by feeding the player below realtime,
+# and every banked second comes out of the player's own buffer: a client with
+# a small live buffer (Channels, TiviMate) stutters until the cushion reaches
+# TARGET_S. The fixed 0.97 before 6.5.0 did that on every tune whose front-load
+# fell short of the target (discussion #46). Worth it only where the client
+# buffers deeply but the tuner dies on input silence (Plex), on a CDN whose
+# catch-up bursts do not rebuild the cushion. A decimal in (0, 1]; else 1.0.
+FLOOR_REQUESTED = os.getenv("RESV_FLOOR", "").strip()
+FLOOR_OK = re.fullmatch(r"0?\.\d+|1(\.0*)?", FLOOR_REQUESTED, re.ASCII) is not None and float(FLOOR_REQUESTED) > 0
+FLOOR = float(FLOOR_REQUESTED) if FLOOR_OK else 1.0
 RATE_WINDOW_S = 120.0                                                 # arrival-rate fallback window
 RATE_FLOOR = 125_000                                                  # 1 Mbps floor (bytes/s)
 STATS_EVERY_S = 15.0
@@ -1221,12 +1232,13 @@ def align_to_188(tail, chunk):
 
 def release_factor(cushion_s, since_release_s):
     """Release rate as a multiple of the content rate: hold the cushion near
-    TARGET_S. Floor 0.97: releasing far below realtime starves the player to
-    feed the reservoir; the cushion comes from front-load and burst surplus
-    instead. For the first GRACE_S the floor is 1.0 - the player owns only the
-    small headstart then, and a sub-realtime feed could drain it before the
-    bank settles. Ceiling 1.15: bleeding a big cushion faster IS the v5 bug."""
-    floor = 1.0 if since_release_s < GRACE_S else 0.97
+    TARGET_S. Floor FLOOR, 1.0 by default: the player is never fed below
+    realtime, and the cushion comes from front-load and burst surplus. A
+    FLOOR under 1.0 still holds 1.0 for the first GRACE_S - the player owns
+    only the small headstart then, and a sub-realtime feed could drain it
+    before the bank settles. Ceiling 1.15: bleeding a big cushion faster IS
+    the v5 bug."""
+    floor = 1.0 if since_release_s < GRACE_S else FLOOR
     level_err = (cushion_s - TARGET_S) / TARGET_S
     return min(max(1.0 + 0.3 * level_err, floor), 1.15)
 
@@ -1274,9 +1286,11 @@ class Pacer:
         self.debt -= now - self.last
         self.last = now
         if self.debt > 0.005:
+            # The debt stays: the next call takes the whole sleep off it, so an
+            # oversleep is paid back. Zeroing it here lost every oversleep -
+            # ~0.23ms per 12ms slice on Linux, 2% under the target rate on an
+            # 8 Mbps channel, which a small player buffer runs dry on.
             time.sleep(self.debt)
-            self.debt = 0.0
-            self.last = time.monotonic()
         elif self.debt < -2.0:
             self.debt = 0.0                                           # don't bank idle time
 
@@ -1471,6 +1485,9 @@ class Stream:
 def main():
     if AUDIO_LANG and not AUDIO_LANG_OK:
         log(f"RESV_AUDIO_LANG={AUDIO_LANG!r} is not a 3-letter code (e.g. fra); ignored")
+    if FLOOR_REQUESTED and not FLOOR_OK:
+        log(f"RESV_FLOOR={FLOOR_REQUESTED!r} is not a decimal above 0 and at most 1 (e.g. 0.97); "
+            f"releasing the stream at no less than realtime (1.0)")
     announce_audio_codec()
     Stream(URL, UA).run()
 

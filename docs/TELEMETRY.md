@@ -55,8 +55,8 @@ Same file, free-form lines:
 
 After the first ~60s of a stream:
 
-- `cushion=` should reach `~25–30s(pcr)` and hold there. `(byte)` is OK during the first 15s; if it stays `(byte)` for minutes the PCR clock never locked — check `pcrrej`.
-- `out=` ≈ `crate=` ± a few percent. `out` higher than `crate` means the controller is bleeding the cushion (transient OK after reconnect; sustained = misconfigured).
+- `cushion=` should reach `~25–30s(pcr)` and hold there, on a CDN that front-loads that much plus the 5s headstart; one that front-loads less leaves it lower (README, "Cushion never reaches the target"). `(byte)` is OK during the first 15s; if it stays `(byte)` for minutes the PCR clock never locked — check `pcrrej`.
+- `out=` ≈ `crate=` within a percent or two while the cushion is at or under the target. `out` higher than `crate` means the controller is bleeding the cushion (transient OK after reconnect; sustained = misconfigured). `out` held a few percent under `crate` means the player is fed below realtime to bank cushion, which a client with a small live buffer shows as stutters: ~3% with `RESV_FLOOR=0.97` since 6.5.0, and 3–5% on every release before it while the cushion was under the target after the first 45s (the 0.97 floor plus the pacer's lost oversleep).
 - `ccerr`, `pcrrej`, `disc`, `sync`, `pcr_back` flat at 0. Any non-zero is a corruption signal worth investigating. `pcr_back` specifically points at CDN overlap-replay (some edges send the same N seconds twice); the player perceives this as a "rewind".
 - `reconnects=0` for the first hour or so unless your provider is one of the unreliable ones; an occasional reconnect is fine, a reconnect every few minutes is not.
 
