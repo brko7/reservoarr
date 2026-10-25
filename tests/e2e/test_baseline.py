@@ -11,20 +11,20 @@ from .harness import ffprobe_streams, run_pipeline
 
 @pytest.mark.e2e
 def test_baseline_builds_cushion(tmp_path, synth_ts):
-    """Run for 60s on a clean stream. By the second stats window, cushion
-    should be close to TARGET_S (30s), out_ts should be playable H.264+AC3."""
+    """Run for 60s on a clean stream. The cushion should hold the CDN's 25s
+    front-load minus the 5s headstart, ~20s (since 6.5.0 nothing banks beyond
+    the front-load), and out_ts should be playable H.264+AC3."""
     run = run_pipeline(tmp_path, synth_ts, rate_bps=300_010, duration_s=65)
 
     stats = run.stats_lines()
     assert stats, f"no telemetry produced\nstderr:\n{run.resv_stderr}\nlog:\n{run.log_text()}"
 
-    # Cushion: by the LAST stats window the script logged, we should be near
-    # TARGET_S. Allow generous slack: the controller takes a few seconds to
-    # settle, and the test wall-clock might end mid-build. Floor: must be
-    # better than v5's ceiling (16s) by a clear margin.
+    # Cushion: by the LAST stats window the script logged, the front-load
+    # should still be banked. It reads ~19.9s against the logged rounding, so
+    # allow 2s; v5 rode 0-16s here, releasing the front-load as it arrived.
     final = stats[-1]
-    assert final["cushion"] >= 20, (
-        f"cushion={final['cushion']}s — v6 should reliably hit >=20s. "
+    assert final["cushion"] >= 18, (
+        f"cushion={final['cushion']}s — the front-load should stay banked (~20s). "
         f"All stats:\n  " + "\n  ".join(s["raw"] for s in stats)
     )
 

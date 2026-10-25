@@ -109,10 +109,10 @@ You should see one stats line per active stream every 15 seconds. The shape is:
 ```
 
 **Healthy after ~60s:**
-- `cushion=` reaches `~25–30s(pcr)` and oscillates within ±6s of that. The `(pcr)` suffix means the cushion is measured off the PCR clock (good); `(byte)` is a degraded fallback.
+- `cushion=` reaches `~25–30s(pcr)` and oscillates within ±6s of that, on a CDN that front-loads that much plus the 5s headstart (see [Cushion never reaches the target](#cushion-never-reaches-the-target)). The `(pcr)` suffix means the cushion is measured off the PCR clock (good); `(byte)` is a degraded fallback.
 - `ccerr`, `pcrrej`, `disc`, `sync`, `pcr_back` flat at zero.
 - `reconnects=0` unless your provider is one of the unreliable ones.
-- `out=` ≈ `crate=` ± a few percent.
+- `out=` ≈ `crate=` within a percent or two while the cushion is at or under the target; above it `out` runs over while the controller bleeds the surplus. Held 3–5% under, see [Micro-stutters](#micro-stutters-every-so-often-the-log-looks-healthy).
 
 If something looks off, see [Troubleshooting](#troubleshooting) below. Full telemetry schema in [docs/TELEMETRY.md](docs/TELEMETRY.md).
 
@@ -127,15 +127,25 @@ These are the failure modes real users have hit. Each lists what to check first.
 The cushion is your only protection against starvation gaps. If it's too small for your CDN's worst gaps, the stream still dies — `reservoarr` only buys time, not infinity.
 
 1. Tail the log while the failure happens. Note what `cushion=` was reading just before the death.
-2. If cushion was already low (<10s) when the gap hit: **raise `RESV_TARGET_S`** above your observed worst gap. Each +10s of target ≈ +6–8 MB RAM at typical HD bitrates. Bump `RESV_MAX_BYTES` proportionally.
+2. If cushion was already low (<10s) when the gap hit: **raise `RESV_TARGET_S`** above your observed worst gap. Each +10s of target ≈ +6–8 MB RAM at typical HD bitrates. Bump `RESV_MAX_BYTES` proportionally. A higher target keeps more of what the CDN front-loads; if `cushion=` already sat under the target, see the next entry.
 3. If cushion was healthy (~30s) and you saw a single very long gap (>30s): the CDN is broken or rate-limited. Increase target *and* check provider status — no buffer can hide a sustained content stoppage.
 
 ### "Cushion never reaches the target"
 
-`cushion=` plateaus at 5–15s and won't climb. Two common causes:
+`cushion=` plateaus at 5–15s and won't climb. Three common causes:
 
 1. **Source is bitrate-degraded.** Compare `crate=` (PCR content rate) to your channel's nominal rate. If `crate` is well under (e.g. a "5 Mbps" HD channel showing `crate=2 Mbps`), the CDN is throttling and the front-load burst doesn't contain 30s of content. **Nothing to fix in reservoarr; talk to your provider.**
 2. **Cushion is stuck on `(byte)` source.** The PCR clock never locked. Check `pcrrej=`; if it's climbing every window, the stream's PCR samples are unparseable. Try `tools/parsecheck.py` on a captured upstream to confirm.
+3. **The CDN front-loads less than the target.** Since 6.5.0 reservoarr never feeds the player below realtime (`RESV_FLOOR=1.0`), so the cushion holds what the CDN front-loads, minus the `RESV_HEADSTART_S` (5s) that goes straight to the player, and what its catch-up bursts bring after a gap: a CDN that front-loads 10s leaves 5s. On Plex, `RESV_FLOOR=0.97` builds the rest by feeding Plex ~3% under realtime until the target is reached; that deficit comes out of the client's buffer, so read the next entry first.
+
+### "Micro-stutters every so often, the log looks healthy"
+
+The picture freezes for a moment every so often, the player's own buffer reads near empty, and `delaybuf.log` shows a cushion of 10s or more with every error counter at zero. Compare `out=` with `crate=`: if `out` stays 3–5% under `crate` (e.g. `out=8.10Mbps crate=8.47Mbps`), reservoarr is feeding the player slower than realtime to bank cushion, and every second it banks comes out of the player's buffer ([discussion #46](https://github.com/brko7/reservoarr/discussions/46)). Before 6.5.0 it always did this after the first 45s while the cushion was under `RESV_TARGET_S`: a client with a small live buffer (Channels, TiviMate) stutters until the cushion reaches the target, and again after every gap that drains it.
+
+1. On 6.5.0 or later: remove `RESV_FLOOR` from the profile, or set it to `1.0`.
+2. On an older release: update, or add `RESV_GRACE_S=inf` to the profile parameters (see [where settings go](docs/TUNABLES.md#where-settings-go)), which keeps the floor at `1.0` for the whole stream. The pacer of those releases still runs 1–4% under realtime, depending on the bitrate (~2% at 8 Mbps); 6.5.0 fixes that too.
+
+Lowering `RESV_TARGET_S` also stops it, but releases everything above the new target at up to 1.15×, so reservoarr keeps only that much.
 
 ### "ccerr or sync errors keep climbing"
 

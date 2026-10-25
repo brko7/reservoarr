@@ -1,6 +1,6 @@
 # Tunables
 
-Defaults are unchanged since v6.1 and calibrated against real incidents (see the [CHANGELOG](../CHANGELOG.md)). **Override only with evidence.**
+Defaults are calibrated against real incidents (see the [CHANGELOG](../CHANGELOG.md)); the one change since v6.1 is the release floor, `1.0` since 6.5.0 (`RESV_FLOOR`). **Override only with evidence.**
 
 ## Where settings go
 
@@ -27,7 +27,8 @@ Put them in the stream profile, in front of the script, with `/usr/bin/env`:
 | `RESV_PREFILL_MAX_S` | `3.0` | Sniff timeout. Must stay well under Dispatcharr's `CONNECTION_TIMEOUT` (~10s). |
 | `RESV_HEADSTART_S` | `5.0` | Seconds of content released unpaced after prefill. Gives Plex its startup buffer fast; the rest of the CDN's front-load burst stays banked. |
 | `RESV_TARGET_S` | `30.0` | Cushion level the controller holds. Tune higher only if your CDN's worst gaps are longer. |
-| `RESV_GRACE_S` | `45.0` | First N seconds use floor `1.0` (realtime release); after, floor drops to `0.97`. Prevents starving the player before the bank settles. |
+| `RESV_GRACE_S` | `45.0` | Only with `RESV_FLOOR` under `1.0`: the first N seconds still release at no less than realtime, then the floor drops to `RESV_FLOOR`. Keeps a sub-realtime feed from draining the player while it holds only the headstart. Before 6.5.0 the floor after it was a fixed `0.97`, and `RESV_GRACE_S=inf` keeps `1.0` on those releases. |
+| `RESV_FLOOR` | `1.0` | Lowest release rate, as a multiple of the content rate, while the cushion is under `RESV_TARGET_S`. `1.0` never feeds the player below realtime: the cushion holds what the CDN front-loads (minus `RESV_HEADSTART_S`) and what its catch-up bursts bring, up to the target, and does not grow past that on its own. Under `1.0` the reservoir also banks by feeding the player slower than realtime, and every second banked comes out of the player's own buffer: at `0.97` the player gets 0.97s of content per second, so a client with a small live buffer (Channels, TiviMate) runs dry and stutters until the cushion reaches the target, while the log looks healthy and `out` sits ~3% under `crate` ([discussion #46](https://github.com/brko7/reservoarr/discussions/46)). Set `0.97`, the fixed value before 6.5.0, only behind a tuner that dies on input silence (Plex Live TV) whose client buffers deeply enough to absorb it, on a CDN that leaves the cushion well under the target. A decimal above 0 and at most 1; anything else is logged and read as `1.0`. Values under `0.7` act as `0.7`, the lowest the controller asks for (an empty cushion) (6.5.0). |
 | `RESV_MAX_BYTES` | `268435456` (256 MB) | Reservoir hard cap. Worst-case RAM per concurrent stream. |
 | `RESV_STALL_S` | `25.0` | No-ingest watchdog (#4). If no bytes arrive for this long while running, force a reconnect WITHOUT flushing the buffer. A silent connection is cut at once (6.4.0; a hang while connecting still waits out the 30s timeout; before, the reconnect waited out the 30s socket timeout, so values under 30 changed nothing). A full reservoir is not a stall. `0` disables. |
 | `RESV_GIVEUP_TRIES` | `0` | Upstream attempts that may end without a single byte before the process exits, so Dispatcharr counts a failed attempt and, after its own retries, moves the channel to the next stream. Errors and connects that close empty both count; once any byte has arrived it never fires. `0` retries forever, as before. Without it, a stream the edge answers `403` keeps the channel "connecting" until the client gives up, and the chain is never walked. A refused attempt ends the process within the second, without waiting out `RESV_PREFILL_MAX_S` (6.3.7). |
@@ -48,6 +49,8 @@ Put them in the stream profile, in front of the script, with `/usr/bin/env`:
 
 ## When to bump what
 
-- **Cushion too small for your CDN's prime-time gaps** → raise `RESV_TARGET_S` (cushion target) and `RESV_MAX_BYTES` (RAM cap) together. Each +10s of cushion is ~6–8 MB of extra RAM at typical HD bitrates.
+- **Cushion too small for your CDN's prime-time gaps** → raise `RESV_TARGET_S` (cushion target) and `RESV_MAX_BYTES` (RAM cap) together. Each +10s of cushion is ~6–8 MB of extra RAM at typical HD bitrates. At the default `RESV_FLOOR=1.0` a higher target keeps more of what the CDN front-loads and nothing more: if `cushion=` already sits under the target, raising it changes nothing on its own.
+- **Cushion stays well under the target, on Plex** → `RESV_FLOOR=0.97` builds the rest by feeding Plex ~3% under realtime until the target is reached. Watch for stutters: that deficit is taken from the client's buffer.
+- **Micro-stutters every so often while the log looks healthy** → check `out` against `crate`. 3–5% under means the player is fed below realtime: remove `RESV_FLOOR`, or on a release before 6.5.0 add `RESV_GRACE_S=inf`.
 - **Stall watchdog firing on benign gaps** → raise `RESV_STALL_S`. The default 25s sits above the CDN's normal burst-gap; if yours is longer, set it slightly above your observed worst-case.
 - **Arming the #5 detector** → see the arming-test recipe in the [CHANGELOG](../CHANGELOG.md) v6.1.0 entry. Don't flip `RESV_TS_RECONNECT=1` blindly; it's gated on evidence that fresh-edge reconnects actually serve clean content for your provider.
