@@ -9,9 +9,9 @@ A delay-buffer **stream profile for [Dispatcharr](https://github.com/Dispatcharr
 
 ```
 upstream HTTP  ──►  RAM reservoir  ──►  paced release  ──►  ffmpeg remux  ──►  Dispatcharr  ──►  Plex
-(urllib, eager  (≤256MB,             (byte-rate sleeps      (video copy +
- fetch,          ~30s target          @ PCR content          dump_extra,
- auto-reconnect) cushion)             rate)                  audio → AC3/AAC)
+(urllib, eager  (≤256MB,             (sleeps in content     (video copy +
+ fetch,          ~30s target          time, off the          dump_extra,
+ auto-reconnect) cushion)             PCR clock)             audio → AC3/AAC)
 ```
 
 Plex Live TV's tuner gives up after ~15s of input starvation. IPTV CDNs commonly deliver TS in short bursts with prime-time gaps that exceed this, plus corrupt packets with garbage DTS, mid-stream EOFs, and per-connection corrupt-loops. `reservoarr.py` sits between the CDN and Plex, eagerly drains the upstream into a RAM reservoir, and releases bytes to ffmpeg at the stream's measured PCR content rate — so playback runs ~30s behind live and gaps shorter than the cushion are invisible to Plex.
@@ -112,7 +112,7 @@ You should see one stats line per active stream every 15 seconds. The shape is:
 - `cushion=` reaches `~25–30s(pcr)` and oscillates within ±6s of that, on a CDN that front-loads that much plus the 5s headstart (see [Cushion never reaches the target](#cushion-never-reaches-the-target)). The `(pcr)` suffix means the cushion is measured off the PCR clock (good); `(byte)` is a degraded fallback.
 - `ccerr`, `pcrrej`, `disc`, `sync`, `pcr_back` flat at zero.
 - `reconnects=0` unless your provider is one of the unreliable ones.
-- `out=` ≈ `crate=` within a percent or two while the cushion is at or under the target; above it `out` runs over while the controller bleeds the surplus. Held 3–5% under, see [Micro-stutters](#micro-stutters-every-so-often-the-log-looks-healthy).
+- `out=` ≈ `crate=` on average over several minutes while the cushion is at or under the target; above it `out` runs over while the controller bleeds the surplus. On a channel whose bitrate varies, single lines swing over and under `crate`: `out` follows the content, `crate` is a 90s average. Held 3–5% under for minutes, see [Micro-stutters](#micro-stutters-every-so-often-the-log-looks-healthy).
 
 If something looks off, see [Troubleshooting](#troubleshooting) below. Full telemetry schema in [docs/TELEMETRY.md](docs/TELEMETRY.md).
 
@@ -140,7 +140,12 @@ The cushion is your only protection against starvation gaps. If it's too small f
 
 ### "Micro-stutters every so often, the log looks healthy"
 
-The picture freezes for a moment every so often, the player's own buffer reads near empty, and `delaybuf.log` shows a cushion of 10s or more with every error counter at zero. Compare `out=` with `crate=`: if `out` stays 3–5% under `crate` (e.g. `out=8.10Mbps crate=8.47Mbps`), reservoarr is feeding the player slower than realtime to bank cushion, and every second it banks comes out of the player's buffer ([discussion #46](https://github.com/brko7/reservoarr/discussions/46)). Before 6.5.0 it always did this after the first 45s while the cushion was under `RESV_TARGET_S`: a client with a small live buffer (Channels, TiviMate) stutters until the cushion reaches the target, and again after every gap that drains it.
+The picture freezes for a moment every so often, the player's own buffer reads near empty, and `delaybuf.log` looks healthy, every error counter at zero. Two causes, both fixed:
+
+- **Before 6.6.0, on every channel whose bitrate varies.** The release ran at `crate`, a 90s average, so content denser than the average reached the player slower than realtime, and lighter content faster. Ordinary swings cost a player a few seconds of buffer at a time; when a drop in bitrate ends, the player gets as little as 40% of realtime for up to a minute. In the log, `crate` slides steadily for 90s with `vholes=0%`, the cushion falls to 0 while it does, and once the bitrate comes back `buf` grows faster than `cushion` while `out` stays near the low `crate` ([discussion #46](https://github.com/brko7/reservoarr/discussions/46)). No setting fixes it: update.
+- **Fed below realtime to bank cushion.** Compare `out=` with `crate=` over several minutes: if `out` stays 3–5% under `crate` (e.g. `out=8.10Mbps crate=8.47Mbps`), reservoarr is feeding the player slower than realtime to bank cushion, and every second it banks comes out of the player's buffer ([discussion #46](https://github.com/brko7/reservoarr/discussions/46)). Before 6.5.0 it always did this after the first 45s while the cushion was under `RESV_TARGET_S`: a client with a small live buffer (Channels, TiviMate) stutters until the cushion reaches the target, and again after every gap that drains it.
+
+For the second:
 
 1. On 6.5.0 or later: remove `RESV_FLOOR` from the profile, or set it to `1.0`.
 2. On an older release: update, or add `RESV_GRACE_S=inf` to the profile parameters (see [where settings go](docs/TUNABLES.md#where-settings-go)), which keeps the floor at `1.0` for the whole stream. The pacer of those releases still runs 1–4% under realtime, depending on the bitrate (~2% at 8 Mbps); 6.5.0 fixes that too.
@@ -187,9 +192,9 @@ Open a [Discussion](https://github.com/brko7/reservoarr/discussions) with:
 
 ## How it works
 
-Pacing happens in the wrapper, not in ffmpeg. The reservoir fetches upstream bytes eagerly while a controller releases them to ffmpeg at the stream's **PCR content rate** (bytes-per-second of media time), holding a ~30s cushion. The CDN's per-connection front-load burst banks the cushion; gaps shorter than the cushion drain it without the player ever noticing.
+Pacing happens in the wrapper, not in ffmpeg. The reservoir fetches upstream bytes eagerly while a controller releases them to ffmpeg in **content time**: each slice goes out at the stream's PCR content rate (bytes per second of media time) and is trued up to the content it carries at every PCR, so a channel whose bitrate varies still reaches the player in realtime. The controller holds a ~30s cushion. The CDN's per-connection front-load burst banks the cushion; gaps shorter than the cushion drain it without the player ever noticing.
 
-Why pace here and not with `ffmpeg -re`: the provider's streams carry occasional corrupt packets with garbage DTS values, and `-re` sleeps on them (observed 25s output freeze with a full reservoir). PCR is a *measurement* input — a garbage sample is rejected by a plausibility window and the chain re-anchors.
+Why pace here and not with `ffmpeg -re`: the provider's streams carry occasional corrupt packets with garbage DTS values, and `-re` sleeps on them (observed 25s output freeze with a full reservoir). The PCR clock reservoarr paces on is filtered: a garbage sample is rejected by a plausibility window and the chain re-anchors, and the content time charged between two PCRs is held to ¼–4× the byte-rate time of the bytes in between and to 0.25s over it, so one that slips through costs at most a quarter of a second, not a 25s sleep.
 
 Three watchdogs ride alongside (and if ffmpeg dies on its own, the stream ends so Dispatcharr can retry):
 

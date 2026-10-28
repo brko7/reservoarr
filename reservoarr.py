@@ -10,9 +10,11 @@ and gaps shorter than the cushion are invisible to Plex.
 Pacing is done HERE, not with ffmpeg -re: the provider's streams carry
 occasional corrupt packets with garbage DTS values, and -re sleeps on them
 (observed 25s output freeze with a full reservoir). Release is executed as
-byte-rate sleeps; the *rate reference* is bytes-per-PCR-second measured on
-ingest with outlier rejection, so a garbage timestamp is dropped instead of
-slept on. v5 paced against the measured *arrival* rate, which squandered
+sleeps in Python, paced on the content time each slice carries: the parser's
+PCR clock, which drops a garbage sample instead of sleeping on it, bounded by
+the slice's byte-rate time at bytes-per-PCR-second measured on ingest. Pacing
+on bytes alone fed a VBR channel below realtime whenever it ran denser than
+its 90s average (6.6.0). v5 paced against the measured *arrival* rate, which squandered
 the CDN's per-connection front-load burst (released at 5-7 Mbps chasing the
 inflated arrival rate) and could never rebuild a cushion at steady state
 (arrival averages exactly realtime; the 0.97 floor was cancelled by a gap
@@ -81,6 +83,9 @@ FLOOR = float(FLOOR_REQUESTED) if FLOOR_OK else 1.0
 RATE_WINDOW_S = 120.0                                                 # arrival-rate fallback window
 RATE_FLOOR = 125_000                                                  # 1 Mbps floor (bytes/s)
 STATS_EVERY_S = 15.0
+CHARGE_BOUND = 4.0                                                    # content time trusted within 1/4..4x the byte-rate time
+CONTENT_STALE_S = 1.0                                                 # byte-rate time without a PCR advance: stuck clock
+TRUE_UP_MAX_S = 0.25                                                  # most one true-up may add to the byte-rate charge
 # Ingest-side TS-corruption detector (#5): a sustained CC/sync error rate while
 # data still flows = wedged/corrupt upstream, detectable ~30s before the ffmpeg
 # stderr loop trigger. Log-only ("would-fire") until a 2nd real episode confirms
@@ -406,13 +411,15 @@ class TsParser:
 
     Deque append/popleft are thread-safe; the fetcher feeds, the pacer
     reads. Stats counters are plain ints (GIL-atomic reads, drift is fine).
-    Marks are keyed on `fed`, the bytes fed so far: every piece the fetcher
+    Marks are keyed on the stream offset of the end of the packet carrying
+    the PCR, counted in `fed`, the bytes fed so far: every piece the fetcher
     puts in the reservoir is fed here once, so `fed` tracks the reservoir's
     in_total and the pacer's released-byte count lines up with the marks.
     """
 
     def __init__(self):
         self.fed = 0
+        self.base = 0                                                 # stream offset of the buffer being parsed
         self.cc_errors = 0
         self.sync_losses = 0
         self.pcr_rejects = 0
@@ -443,6 +450,7 @@ class TsParser:
         self.psi = {}
 
     def feed(self, data):
+        self.base = self.fed - len(self.carry)                       # stream offset of buf_[0]
         self.fed += len(data)
         buf_ = self.carry + data if self.carry else data
         n = len(buf_)
@@ -530,7 +538,10 @@ class TsParser:
             self.reject_run = 0
             self.cum_pcr += delta
             self.last_pcr = pcr
-            mark = (self.fed, self.cum_pcr)
+            # Keyed on the end of this packet, not of the chunk it came in:
+            # a chunk is 94KB, 0.75s of a 1 Mbps channel, and the pacer
+            # trues up to these marks (6.6.0).
+            mark = (self.base + i + 188, self.cum_pcr)
             self.rate_marks.append(mark)
             self.cush_marks.append(mark)
             rm = self.rate_marks
@@ -642,15 +653,21 @@ class TsParser:
             return None                                               # burst-inflated arrival rate
         return max((o1 - o0) / (p1 - p0), RATE_FLOOR)
 
-    def cushion_s(self, released_total):
-        """Seconds of media in the reservoir, or None if unmeasurable
-        (pre-PCR-lock, or right after a reconnect seam)."""
+    def released_pcr(self, released_total):
+        """Content position of the release: cum_pcr at the last mark at or
+        before released_total, or None if unmeasurable (pre-PCR-lock, or
+        right after a reconnect seam)."""
         cm = self.cush_marks
         while len(cm) >= 2 and cm[1][0] <= released_total:
             cm.popleft()
         if not cm or cm[0][0] > released_total:
             return None
-        return self.cum_pcr - cm[0][1]
+        return cm[0][1]
+
+    def cushion_s(self, released_total):
+        """Seconds of media in the reservoir, or None if unmeasurable."""
+        released = self.released_pcr(released_total)
+        return None if released is None else self.cum_pcr - released
 
 
 class Reservoir:
@@ -1248,10 +1265,18 @@ class Level(NamedTuple):
     rate: float                                                       # pacing reference: crate, else arrival rate
     cush_pcr: float | None                                            # cushion off the PCR clock, None if unmeasurable
     cush: float                                                       # cushion in seconds (PCR, else a byte estimate)
+    released_s: float | None = None                                   # content position of the release, None if unmeasurable
 
 
 class Pacer:
-    """Byte-rate pacing of the release (never ffmpeg -re: invariant #1)."""
+    """Paces the release on the content time it carries (never ffmpeg -re:
+    invariant #1). Each slice is charged its byte-rate time at once, and
+    when the PCR clock moves past it, the charge is trued up to the content
+    time between the two marks, bounded to 1/4..4x the byte-rate time of the
+    bytes in between and to TRUE_UP_MAX_S over it, so a garbage PCR the
+    parser let through costs a quarter of a second at most. The content rate is a 90s average: bytes
+    alone ran a VBR channel under realtime whenever it was denser than that
+    average, down to ~40% of realtime when a drop in bitrate ended."""
 
     def __init__(self, parser, reservoir):
         self.parser = parser
@@ -1261,28 +1286,57 @@ class Pacer:
         self.headstart_bytes = 0                                      # byte backstop before PCR lock
         self.debt = 0.0                                               # seconds owed to pacing
         self.last = time.monotonic()
+        self.mark = None                                              # content position charged up to, None = unanchored
+        self.pending = 0.0                                            # byte-rate time charged since the mark
+        self.released_total = 0                                       # bytes out of the reservoir at the last measure()
 
     def measure(self, released_total):
         crate = self.parser.content_rate()
         rate = crate if crate is not None else self.reservoir.in_rate()
-        cush_pcr = self.parser.cushion_s(released_total)
+        released_s = self.parser.released_pcr(released_total)
+        cush_pcr = None if released_s is None else self.parser.cum_pcr - released_s
         cush = cush_pcr if cush_pcr is not None else self.reservoir.bytes / rate
-        return Level(crate, rate, cush_pcr, cush)
+        # More left than one slice since the last call: a flush. The content
+        # it skipped was never released, so it is not trued up.
+        if released_total - self.released_total > PACE_SLICE:
+            self.mark = None
+        self.released_total = released_total
+        return Level(crate, rate, cush_pcr, cush, released_s)
 
     def pace(self, n, level):
-        """Sleep off what releasing n more bytes owes at the target rate."""
+        """Sleep off what releasing n more bytes owes: the content time they
+        carry, at the release factor."""
         now = time.monotonic()
         # Head start: HEADSTART_S seconds of *content* go out unpaced so
         # Plex gets its startup buffer fast; everything else of the CDN's
         # per-connection front-load burst stays banked in the reservoir.
-        released_s = self.parser.cum_pcr - level.cush_pcr if level.cush_pcr is not None else None
+        released_s = level.released_s
         if (now - self.release_start < 15
                 and (released_s < HEADSTART_S if released_s is not None
                      else self.headstart_bytes < 2560 * 1024)):
             self.headstart_bytes += n
             return
-        r = level.rate * release_factor(level.cush, now - self.release_start)
-        self.debt += n / r
+        factor = release_factor(level.cush, now - self.release_start)
+        byte_s = n / level.rate
+        owed = byte_s
+        if released_s is None:
+            self.mark = None                                          # unmeasurable: bytes alone
+        elif self.mark is None:
+            self.mark, self.pending = released_s, 0.0
+        else:
+            # PCR marks come every 20-100ms of content, a slice is ~12ms: most
+            # slices see no advance and keep their byte-rate charge.
+            self.pending += byte_s
+            advanced = released_s - self.mark
+            # A clock that did not move for CONTENT_STALE_S of bytes (a run of
+            # rejects, a lost PCR PID) is not trued up: they went out at the byte rate.
+            if advanced > 0:
+                if self.pending <= CONTENT_STALE_S:
+                    content_s = min(max(advanced, self.pending / CHARGE_BOUND), self.pending * CHARGE_BOUND,
+                                    self.pending + TRUE_UP_MAX_S)
+                    owed += content_s - self.pending
+                self.mark, self.pending = released_s, 0.0
+        self.debt += owed / factor
         self.debt -= now - self.last
         self.last = now
         if self.debt > 0.005:

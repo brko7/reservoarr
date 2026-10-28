@@ -55,12 +55,14 @@ bump version:
 lint: venv syntax version-check
     @{{ruff}} check .
 
-# Generate the deterministic synthetic TS fixture (180s, ~54MB, H.264 + AC3, with PCR).
+# Generate the deterministic synthetic TS fixture (180s, ~54MB, H.264 + AC3, with PCR)
+# and the VBR one (145s, ~50MB, 3 -> 1 -> 3 Mbps).
 # Provider-independent — CI uses this, not a captured stream.
 fixture:
     @test -n "{{ffmpeg_bin}}" || (echo "ERROR: ffmpeg not found in PATH"; exit 1)
     @mkdir -p fixtures
     @bash tools/make_synth_ts.sh fixtures/synth.ts
+    @bash tools/make_vbr_ts.sh fixtures/vbr.ts
 
 # Unit tests only (no ffmpeg, no subprocesses).
 test: venv
