@@ -9,6 +9,7 @@ is the system binary. Everything else (stdlib-only reservoarr.py, real ffmpeg
 subprocess, real urllib HTTP client) is the production code path."""
 from __future__ import annotations
 
+import bisect
 import contextlib
 import os
 import re
@@ -16,8 +17,9 @@ import shutil
 import socket
 import subprocess
 import sys
+import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -51,6 +53,7 @@ class Run:
     cdn_stdout: str
     resv_stderr: str
     duration_s: float
+    arrivals: list[tuple[float, int]] = field(default_factory=list)   # (wall s, output bytes so far)
 
     def stats_lines(self) -> list[dict]:
         """Parse the delaybuf.log telemetry lines into dicts.
@@ -98,6 +101,7 @@ def run_pipeline(
     corrupt_from: float | None = None,
     corrupt_rate: int = 5,
     replay_skip: bool = False,
+    pcr_paced: bool = False,
     ts_channel: str | None = None,
     log_dir: Path | None = None,
     extra_env: dict[str, str] | None = None,
@@ -118,6 +122,8 @@ def run_pipeline(
 
     cdn_argv = [sys.executable, str(CDN_SIM), str(capture), str(rate_bps),
                 "--port", str(port), "--front", str(front_s)]
+    if pcr_paced:
+        cdn_argv.append("--pcr")
     for s, d in stalls or []:
         cdn_argv += ["--stall", f"{s}:{d}"]
     if eof_at:
@@ -155,8 +161,13 @@ def run_pipeline(
             resv = subprocess.Popen(
                 [sys.executable, str(RESERVOIR),
                  f"http://127.0.0.1:{port}/sim-test", "Mozilla/5.0"],
-                stdout=f, stderr=subprocess.PIPE, env=env,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
             )
+            arrivals: list[tuple[float, int]] = []
+            # The player's side: the output lands in out_ts, and when each
+            # byte arrived is kept for player_lead().
+            copier = threading.Thread(target=_copy_out, args=(resv.stdout, f, arrivals), daemon=True)
+            copier.start()
             try:
                 t0 = time.time()
                 resv.wait(timeout=duration_s)
@@ -169,6 +180,9 @@ def run_pipeline(
                     resv.kill()
                     resv.wait()
                 wall = duration_s
+            copier.join(timeout=10)
+            if copier.is_alive():                                     # ffmpeg outlived reservoarr, holding stdout
+                raise RuntimeError("reservoarr's output pipe stayed open 10s after it exited; out_ts is incomplete")
             resv_err = resv.stderr.read().decode("utf-8", "replace")
     finally:
         cdn.terminate()
@@ -181,7 +195,43 @@ def run_pipeline(
             cdn_out = ""
 
     return Run(out_ts=out_ts, log_file=log_file, cdn_stdout=cdn_out or "",
-               resv_stderr=resv_err, duration_s=wall)
+               resv_stderr=resv_err, duration_s=wall, arrivals=arrivals)
+
+
+def _copy_out(src, dst, arrivals):
+    t0 = time.monotonic()
+    total = 0
+    for chunk in iter(lambda: src.read1(65536), b""):
+        dst.write(chunk)
+        total += len(chunk)
+        arrivals.append((time.monotonic() - t0, total))
+
+
+def player_lead(run: Run) -> list[tuple[float, float]]:
+    """(wall s, lead s) for every PCR of the output: how far the content
+    that has reached the player runs ahead of realtime, both clocks counted
+    from the first output PCR. A player that starts with B seconds buffered
+    stalls once the lead falls more than B under where it started."""
+    data = run.out_ts.read_bytes()
+    ends = [n for _, n in run.arrivals]
+    lead, first, pid0 = [], None, None
+    for i in range(0, len(data) - 187, 188):
+        if data[i] != 0x47 or not data[i + 3] & 0x20 or data[i + 4] < 7 or not data[i + 5] & 0x10:
+            continue
+        pid = (data[i + 1] & 0x1F) << 8 | data[i + 2]
+        pid0 = pid if pid0 is None else pid0
+        if pid != pid0:
+            continue
+        b = data[i + 6:i + 11]
+        pcr = (b[0] << 25 | b[1] << 17 | b[2] << 9 | b[3] << 1 | b[4] >> 7) / 90000.0
+        k = bisect.bisect_left(ends, i + 188)
+        if k == len(ends):
+            break
+        wall = run.arrivals[k][0]
+        if first is None:
+            first = (wall, pcr)
+        lead.append((wall - first[0], (pcr - first[1]) - (wall - first[0])))
+    return lead
 
 
 def ffprobe_streams(path: Path) -> list[dict]:

@@ -56,3 +56,12 @@ def synth_ts():
     if not p.exists():
         pytest.skip(f"{p} not generated; run `just fixture` first")
     return p
+
+
+@pytest.fixture(scope="session")
+def vbr_ts():
+    """Path to the VBR fixture (3 -> 1 -> 3 Mbps). Skips if not generated yet."""
+    p = FIXTURES / "vbr.ts"
+    if not p.exists():
+        pytest.skip(f"{p} not generated; run `just fixture` first")
+    return p

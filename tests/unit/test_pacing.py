@@ -171,3 +171,162 @@ def test_the_pacer_pays_back_oversleep(resv, monkeypatch, over):
     for _ in range(1000):
         pacer.pace(resv.PACE_SLICE, level)
     assert clock.now - start == pytest.approx(1000 * resv.PACE_SLICE / rate, rel=0.005)
+
+
+class Content:
+    """Feeds the pacer what Stream.pump() would: after each slice, the parser's
+    PCR clock and the cushion behind it, for a stream whose content carries
+    `density` bytes per content second, with a PCR mark every 40ms."""
+
+    MARK_S = 0.04
+
+    def __init__(self, resv, rate, density):
+        self.resv = resv
+        self.rate = rate
+        self.density = density
+        self.parser = resv.TsParser()
+        self.released = 0.0                                           # content seconds released
+        self.lead = 10.0                                              # content seconds buffered past the release
+
+    def level(self, released_s):
+        """`released_s`: the content position of the last PCR mark released."""
+        self.parser.cum_pcr = released_s + self.lead
+        return self.resv.Level(crate=self.rate, rate=self.rate, cush_pcr=self.lead, cush=self.lead,
+                               released_s=released_s)
+
+    def run(self, pacer, seconds, jump=0.0):
+        """Release `seconds` of content slice by slice. `jump` is added to the
+        PCR clock halfway through, as a garbage sample the parser let through."""
+        end = self.released + seconds
+        half = self.released + seconds / 2
+        jumped = 0.0
+        while self.released < end:
+            self.released += self.resv.PACE_SLICE / self.density
+            if jump and not jumped and self.released >= half:
+                jumped = jump
+            mark = (self.released // self.MARK_S) * self.MARK_S + jumped
+            pacer.pace(self.resv.PACE_SLICE, self.level(mark))
+
+
+def content_pacer(resv, monkeypatch, rate, density):
+    clock = FakeClock(0.0)
+    monkeypatch.setattr(resv, "time", clock)
+    content = Content(resv, rate, density)
+    pacer = resv.Pacer(content.parser, resv.Reservoir(threading.Event()))
+    clock.now += 20                                                   # past the headstart window
+    content.run(pacer, 1.0)                                           # anchors, drops the 20s idle
+    return clock, content, pacer
+
+
+@pytest.mark.parametrize("density", [0.5, 1.0, 1.3, 2.0])
+def test_the_release_follows_content_time_not_the_average_rate(resv, monkeypatch, density):
+    """The content rate is a 90s average. Paced on bytes, content denser than
+    that average went out under realtime: after a drop in bitrate ended, the
+    average still held the low rate and the player was fed 40% of realtime
+    (discussion #46). The release now takes as long as the content it carries."""
+    rate = 1_000_000
+    clock, content, pacer = content_pacer(resv, monkeypatch, rate, density * rate)
+    start = clock.now
+    content.run(pacer, 60.0)
+    assert clock.now - start == pytest.approx(60.0, abs=0.05)
+
+
+@pytest.mark.parametrize("density, expected", [(10.0, 60.0 * 10 / 4), (0.1, 60.0 * 0.1 * 4)])
+def test_content_time_is_trusted_within_four_times_the_byte_time(resv, monkeypatch, density, expected):
+    """Far outside 1/4..4x the byte-rate time, the PCR is not believed: a
+    stretch that sparse or that dense is a broken clock, not content."""
+    rate = 1_000_000
+    clock, content, pacer = content_pacer(resv, monkeypatch, rate, density * rate)
+    start = clock.now
+    content.run(pacer, 60.0)
+    assert clock.now - start == pytest.approx(expected, rel=0.01)
+
+
+def test_a_garbage_pcr_jump_costs_a_fraction_of_a_second(resv, monkeypatch):
+    """A forward jump under 10s passes the parser's plausibility window. Slept
+    on, it would freeze the output for the whole jump: the -re failure that
+    invariant #1 exists for."""
+    rate = 1_000_000
+    clock, content, pacer = content_pacer(resv, monkeypatch, rate, rate)
+    start = clock.now
+    content.run(pacer, 20.0, jump=9.0)
+    assert 20.0 <= clock.now - start < 20.2
+
+
+class LongestSleep(FakeClock):
+    def __init__(self):
+        super().__init__(0.0)
+        self.longest = 0.0
+
+    def sleep(self, s):
+        self.longest = max(self.longest, s)
+        super().sleep(s)
+
+
+def test_a_garbage_pcr_after_a_run_of_rejects_costs_a_quarter_second(resv, monkeypatch):
+    """The parser re-anchors after 25 rejected PCRs, ~1s of content: up to
+    then nothing advances, and one garbage sample accepted at the end of the
+    run used to be trued up to 4x all those bytes, a ~3s sleep."""
+    rate = 1_000_000
+    clock = LongestSleep()
+    monkeypatch.setattr(resv, "time", clock)
+    content = Content(resv, rate, rate)
+    pacer = resv.Pacer(content.parser, resv.Reservoir(threading.Event()))
+    clock.now += 20
+    content.run(pacer, 1.0)
+    clock.longest = 0.0
+    frozen = content.level(content.released // Content.MARK_S * Content.MARK_S)
+    for _ in range(int(0.95 * rate / resv.PACE_SLICE)):              # 0.95s of rejects
+        pacer.pace(resv.PACE_SLICE, frozen)
+    pacer.pace(resv.PACE_SLICE, content.level(frozen.released_s + 9.0))
+    assert clock.longest < 0.3
+
+
+def test_a_flush_is_not_trued_up(resv, monkeypatch):
+    """A flush empties the reservoir between two slices: the content position
+    jumps by everything flushed. None of it went out, so none of it is owed."""
+    rate = 1_000_000
+    clock = LongestSleep()
+    monkeypatch.setattr(resv, "time", clock)
+    content = Content(resv, rate, rate)
+    pacer = resv.Pacer(content.parser, resv.Reservoir(threading.Event()))
+    clock.now += 20
+    released = 0
+    for _ in range(200):                                              # ~2.4s, through measure() as pump() does
+        released += resv.PACE_SLICE
+        pacer.measure(released)
+        content.released = released / rate
+        pacer.pace(resv.PACE_SLICE, content.level(content.released // Content.MARK_S * Content.MARK_S))
+    clock.longest = 0.0
+    released += 30 * rate                                             # 30s flushed
+    pacer.measure(released)
+    content.released = released / rate
+    pacer.pace(resv.PACE_SLICE, content.level(content.released // Content.MARK_S * Content.MARK_S))
+    assert clock.longest < 0.03                                       # one slice is 12ms
+
+
+def test_a_stuck_pcr_falls_back_to_the_byte_rate(resv, monkeypatch):
+    """No PCR advance (a run of rejects, a lost PCR PID): the release keeps
+    the byte rate instead of going out unpaced, and does not burst when the
+    clock moves again."""
+    rate = 1_000_000
+    clock, content, pacer = content_pacer(resv, monkeypatch, rate, rate)
+    start = clock.now
+    frozen = content.level(content.released // Content.MARK_S * Content.MARK_S)
+    slices = int(5.0 * rate / resv.PACE_SLICE)
+    for _ in range(slices):                                           # 5s of bytes, clock frozen
+        pacer.pace(resv.PACE_SLICE, frozen)
+        content.released += resv.PACE_SLICE / rate
+    assert clock.now - start == pytest.approx(slices * resv.PACE_SLICE / rate, abs=0.05)
+    mid = clock.now                                                   # the clock resumes 5s on
+    content.run(pacer, 10.0)
+    assert clock.now - mid == pytest.approx(10.0, abs=0.1)
+
+
+def test_the_release_factor_applies_to_content_time(resv, monkeypatch):
+    rate = 1_000_000
+    clock, content, pacer = content_pacer(resv, monkeypatch, rate, 2 * rate)
+    content.lead = 45.0                                               # over the 30s target: 1.15x
+    start = clock.now
+    content.run(pacer, 60.0)
+    assert clock.now - start == pytest.approx(60.0 / 1.15, abs=0.05)

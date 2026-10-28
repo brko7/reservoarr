@@ -14,7 +14,7 @@
 | `buf=…MB` | Reservoir size in bytes. |
 | `out=…Mbps` | Output byte rate to ffmpeg. |
 | `in=…Mbps` | Byte rate ingested from upstream. It is also the pacing reference while PCR is unlocked, so a replay dropped by `RESV_REPLAY_SKIP` is not counted. |
-| `crate=…Mbps` | PCR-derived content rate (the pacing reference). |
+| `crate=…Mbps` | PCR-derived content rate: the bytes per second of content over the last ~90s of content. The pacer charges each slice its byte-rate time at this rate and trues it up to the content time it carries at every PCR (6.6.0; before, it paced on this rate alone). A steady slide over 90s with `vholes=0%` is the channel's own bitrate changing, not the feed slowing down. |
 | `in_total=…MB` | Lifetime bytes ingested. Bytes dropped by `RESV_REPLAY_SKIP`, and the partial packets dropped at a connection seam, are not counted. |
 | `reconnects=N` | Upstream reconnects this session. |
 | `ccerr/pcrrej/disc/sync` | TS continuity-counter errors / rejected PCR samples (garbage timestamps) / spec-legal discontinuities / sync losses. Healthy = flat zero. |
@@ -56,7 +56,7 @@ Same file, free-form lines:
 After the first ~60s of a stream:
 
 - `cushion=` should reach `~25–30s(pcr)` and hold there, on a CDN that front-loads that much plus the 5s headstart; one that front-loads less leaves it lower (README, "Cushion never reaches the target"). `(byte)` is OK during the first 15s; if it stays `(byte)` for minutes the PCR clock never locked — check `pcrrej`.
-- `out=` ≈ `crate=` within a percent or two while the cushion is at or under the target. `out` higher than `crate` means the controller is bleeding the cushion (transient OK after reconnect; sustained = misconfigured). `out` held a few percent under `crate` means the player is fed below realtime to bank cushion, which a client with a small live buffer shows as stutters: ~3% with `RESV_FLOOR=0.97` since 6.5.0, and 3–5% on every release before it while the cushion was under the target after the first 45s (the 0.97 floor plus the pacer's lost oversleep).
+- `out=` ≈ `crate=` on average over several minutes while the cushion is at or under the target. Since 6.6.0 `out` follows the content, so on a channel whose bitrate varies a single line can sit well over or under `crate`: over while the bitrate runs above its 90s average, under while it runs below. On a constant-bitrate channel they match within a percent or two. Over several minutes, `out` higher than `crate` means the controller is bleeding the cushion (transient OK after reconnect; sustained = misconfigured), and `out` held a few percent under means the player is fed below realtime to bank cushion, which a client with a small live buffer shows as stutters: ~3% with `RESV_FLOOR=0.97` since 6.5.0, and 3–5% on every release before it while the cushion was under the target after the first 45s (the 0.97 floor plus the pacer's lost oversleep). Releases before 6.6.0 also fed a channel below realtime while its bitrate ran above the average, with `out` matching `crate`: there, a cushion that falls to 0 while `crate` slides over 90s is followed by the player starving when the bitrate comes back.
 - `ccerr`, `pcrrej`, `disc`, `sync`, `pcr_back` flat at 0. Any non-zero is a corruption signal worth investigating. `pcr_back` specifically points at CDN overlap-replay (some edges send the same N seconds twice); the player perceives this as a "rewind".
 - `reconnects=0` for the first hour or so unless your provider is one of the unreliable ones; an occasional reconnect is fine, a reconnect every few minutes is not.
 

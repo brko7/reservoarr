@@ -3,6 +3,8 @@ hand-crafted byte buffers for spec-edge tests (CC wrap, sync recovery, PCR
 garbage rejection)."""
 from __future__ import annotations
 
+import pytest
+
 
 def feed_file(parser, mod, path, chunk=188 * 512):
     """Replay a TS file through the parser the way the fetcher would."""
@@ -289,3 +291,20 @@ def test_content_rate_floor(resv):
     p.cum_pcr = 2.0
     rate = p.content_rate()
     assert rate == resv.RATE_FLOOR
+
+
+def test_pcr_marks_sit_at_their_packet_not_at_the_chunk_end(resv):
+    """The pacer trues its charge up to these marks (6.6.0). Keyed on the end
+    of the chunk they arrived in, every PCR of a 94KB chunk landed on one
+    byte offset: at 1 Mbps the release position moved in 0.75s jumps."""
+    p = resv.TsParser()
+    filler = _ts_packet(pid=0x101)
+    chunk = b""
+    for k in range(10):                                       # a PCR every 4th packet, 0.04s apart
+        chunk += _ts_packet(pid=0x100, cc=k, adaptation=True, pcr_base=90000 + 3600 * k) + filler * 3
+    p.feed(filler * 2)                                        # earlier bytes count towards the offset
+    p.feed(chunk[:1000])                                      # a split mid-packet keeps the offsets
+    p.feed(chunk[1000:])
+    offsets = [o for o, _ in p.cush_marks]
+    assert offsets == [2 * 188 + 4 * 188 * k + 188 for k in range(1, 10)]
+    assert p.cushion_s(offsets[4]) == pytest.approx(0.04 * 4)

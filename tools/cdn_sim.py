@@ -2,7 +2,9 @@
 """CDN simulator for reservoir testing. Replays a captured (or synthetic) TS
 file over HTTP with the IPTorrents-IPTV delivery shape:
 
-- a live edge that advances at the file's real byte rate
+- a live edge that advances at the file's real byte rate, or with --pcr at
+  its content time (the capture's PCR), which a VBR capture needs: at a
+  fixed byte rate its dense stretches arrive slower than realtime
 - each connection instantly receives FRONT_S seconds of backlog (front-load
   burst — the per-connection grace the reservoir's pacing depends on)
 - STALLS: windows where the server withholds output while the edge keeps
@@ -11,7 +13,7 @@ file over HTTP with the IPTorrents-IPTV delivery shape:
 - optional CC-corruption injection in served packets (exercises detector #5)
 
 Usage:
-    cdn_sim.py <capture.ts> <rate_bytes_per_s> [--port N] [--front S]
+    cdn_sim.py <capture.ts> <rate_bytes_per_s> [--port N] [--front S] [--pcr]
                [--stall START:DURATION ...] [--eof-at S]
                [--corrupt-from S --corrupt-rate N]
 
@@ -21,10 +23,34 @@ forced EOF at 120s). Tests pass explicit flags.
 from __future__ import annotations
 
 import argparse
+import bisect
 import contextlib
 import http.server
 import sys
 import time
+
+
+def pcr_index(data):
+    """(offsets, seconds): every PCR on the capture's first PCR PID, as
+    content seconds from the first one (33-bit wrap unwrapped)."""
+    offsets, seconds, pid0, base0, prev = [], [], None, None, None
+    for i in range(0, len(data) - 187, 188):
+        if data[i] != 0x47 or not data[i + 3] & 0x20 or data[i + 4] < 7 or not data[i + 5] & 0x10:
+            continue
+        pid = (data[i + 1] & 0x1F) << 8 | data[i + 2]
+        pid0 = pid if pid0 is None else pid0
+        if pid != pid0:
+            continue
+        b = data[i + 6:i + 11]
+        base = (b[0] << 25 | b[1] << 17 | b[2] << 9 | b[3] << 1 | b[4] >> 7) / 90000.0
+        base0 = base if base0 is None else base0
+        t = (base - base0) % ((1 << 33) / 90000.0)
+        if prev is not None and t < prev:
+            continue                                          # backward PCR: keep the edge monotonic
+        offsets.append(i)
+        seconds.append(t)
+        prev = t
+    return offsets, seconds
 
 
 def parse_stalls(values):
@@ -38,7 +64,9 @@ def parse_stalls(values):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("capture")
-    ap.add_argument("rate", type=float, help="bytes/second the edge advances at")
+    ap.add_argument("rate", type=float, help="bytes/second the edge advances at (with --pcr: startup line only)")
+    ap.add_argument("--pcr", action="store_true",
+                    help="advance the edge at the capture's content time (its PCR), not at a fixed byte rate")
     ap.add_argument("--port", type=int, default=8099)
     ap.add_argument("--front", type=float, default=25.0,
                     help="seconds of front-load backlog per connection")
@@ -60,15 +88,22 @@ def main():
     with open(args.capture, "rb") as f:
         data = bytearray(f.read())
     rate = args.rate
-    front_bytes = int(args.front * rate)
+    pcr_offsets, pcr_seconds = pcr_index(data) if args.pcr else ([], [])
     stalls = parse_stalls(args.stall)
     t0 = time.time() - args.front
     eof_done = False
     corrupt_done = 0
     last_corrupt_window = -1.0
 
+    def edge_at(t):
+        """Bytes of the capture that exist at edge-clock time t."""
+        if not args.pcr:
+            return min(max(int(t * rate), 0), len(data))
+        k = bisect.bisect_right(pcr_seconds, t)
+        return len(data) if k == len(pcr_seconds) else (pcr_offsets[k - 1] if k else 0)
+
     def edge():
-        return min(int((time.time() - t0) * rate), len(data))
+        return edge_at(time.time() - t0)
 
     def stalled(t):
         return any(s <= t < s + d for s, d in stalls)
@@ -116,7 +151,7 @@ def main():
             if edge() >= len(data):
                 print(f"connect after exhaustion t={time.time() - t0:.0f}s -> empty", flush=True)
                 return
-            pos = max(0, edge() - front_bytes)
+            pos = edge_at(time.time() - t0 - args.front)
             pos -= pos % 188                                  # packet-aligned start
             print(f"client connect t={time.time() - t0:.0f}s front={(edge() - pos) / 1e6:.1f}MB",
                   flush=True)
@@ -147,7 +182,7 @@ def main():
 
     http.server.ThreadingHTTPServer.allow_reuse_address = True
     srv = http.server.ThreadingHTTPServer(("127.0.0.1", args.port), H)
-    print(f"cdn_sim :{args.port} rate={rate:.0f}B/s capture={len(data) / 1e6:.0f}MB "
+    print(f"cdn_sim :{args.port} rate={rate:.0f}B/s pcr={args.pcr} capture={len(data) / 1e6:.0f}MB "
           f"dur={len(data) / rate:.0f}s stalls={stalls} eof_at={args.eof_at} "
           f"corrupt_from={args.corrupt_from} corrupt_rate={args.corrupt_rate}",
           flush=True)
