@@ -10,11 +10,12 @@ file over HTTP with the IPTorrents-IPTV delivery shape:
 - STALLS: windows where the server withholds output while the edge keeps
   advancing; on resume the held backlog flushes at line speed (catch-up burst)
 - optional one-shot forced EOF mid-test (exercises the reconnect path)
+- OUTAGES: windows where connections are dropped and new ones answered HTTP 500
 - optional CC-corruption injection in served packets (exercises detector #5)
 
 Usage:
     cdn_sim.py <capture.ts> <rate_bytes_per_s> [--port N] [--front S] [--pcr]
-               [--stall START:DURATION ...] [--eof-at S]
+               [--stall START:DURATION ...] [--down START:DURATION ...] [--eof-at S]
                [--corrupt-from S --corrupt-rate N]
 
 The defaults reproduce the v6.1 e2e shape (12s stall absorbed, 30s trips #4,
@@ -77,6 +78,8 @@ def main():
     # means "active from the first served byte".
     ap.add_argument("--stall", action="append", default=[],
                     help="stall window 'start:duration' on the edge clock (wall time = start - front); repeatable")
+    ap.add_argument("--down", action="append", default=[],
+                    help="outage window 'start:duration' on the edge clock: live connections end, new ones get HTTP 500; repeatable")
     ap.add_argument("--eof-at", type=float, default=0.0,
                     help="force one EOF at this edge-clock time (0 = never; wall time = value - front)")
     ap.add_argument("--corrupt-from", type=float, default=0.0,
@@ -90,6 +93,7 @@ def main():
     rate = args.rate
     pcr_offsets, pcr_seconds = pcr_index(data) if args.pcr else ([], [])
     stalls = parse_stalls(args.stall)
+    outages = parse_stalls(args.down)
     t0 = time.time() - args.front
     eof_done = False
     corrupt_done = 0
@@ -107,6 +111,9 @@ def main():
 
     def stalled(t):
         return any(s <= t < s + d for s, d in stalls)
+
+    def down(t):
+        return any(s <= t < s + d for s, d in outages)
 
     def maybe_corrupt(byte_pos, byte_end, t):
         """Flip CC fields in payload packets within [byte_pos, byte_end) at the
@@ -145,6 +152,10 @@ def main():
 
         def do_GET(self):
             nonlocal eof_done
+            if down(time.time() - t0):
+                print(f"refused t={time.time() - t0:.0f}s (500)", flush=True)
+                self.send_error(500)
+                return
             self.send_response(200)
             self.send_header("Content-Type", "video/mp4")    # CDN mislabels TS; client must not care
             self.end_headers()
@@ -157,6 +168,9 @@ def main():
                   flush=True)
             while True:
                 t = time.time() - t0
+                if down(t):
+                    print(f"outage dropped client t={t:.0f}s", flush=True)
+                    return
                 if args.eof_at > 0 and not eof_done and t >= args.eof_at:
                     eof_done = True
                     print(f"forced EOF t={t:.0f}s", flush=True)
@@ -183,7 +197,7 @@ def main():
     http.server.ThreadingHTTPServer.allow_reuse_address = True
     srv = http.server.ThreadingHTTPServer(("127.0.0.1", args.port), H)
     print(f"cdn_sim :{args.port} rate={rate:.0f}B/s pcr={args.pcr} capture={len(data) / 1e6:.0f}MB "
-          f"dur={len(data) / rate:.0f}s stalls={stalls} eof_at={args.eof_at} "
+          f"dur={len(data) / rate:.0f}s stalls={stalls} outages={outages} eof_at={args.eof_at} "
           f"corrupt_from={args.corrupt_from} corrupt_rate={args.corrupt_rate}",
           flush=True)
     with contextlib.suppress(KeyboardInterrupt):

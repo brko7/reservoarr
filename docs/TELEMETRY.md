@@ -5,7 +5,7 @@
 ## Stats line
 
 ```
-2026-06-14T10:03:33+0200 [500004175] cushion=27s(pcr) buf=15.5MB out=4.66Mbps in=4.96Mbps crate=4.80Mbps in_total=1843MB reconnects=0 ccerr=0 pcrrej=0 disc=0 sync=0 pcr_back=0 vholes=0% aholes=0%
+2026-06-14T10:03:33+0200 [500004175] cushion=27s(pcr) buf=15.5MB out=4.66Mbps in=4.96Mbps crate=4.80Mbps in_total=1843MB reconnects=0 ccerr=0 pcrrej=0 disc=0 sync=0 pcr_back=0 vholes=0% aholes=0% dry=0.0s maxgap=0.2s
 ```
 
 | Field | Meaning |
@@ -20,6 +20,10 @@
 | `ccerr/pcrrej/disc/sync` | TS continuity-counter errors / rejected PCR samples (garbage timestamps) / spec-legal discontinuities / sync losses. Healthy = flat zero. |
 | `pcr_back=N` | Backward PCR jumps > 0.5s (CDN overlap-replay signal — provider re-served N seconds of content). Each event also emits a `pcr backward jump: -Xs (last=… cur=…)` log line. Log-only; pacing is unchanged. Healthy = flat zero. |
 | `vholes=N%` `aholes=N%` | Share of the window's content that the video, and the sound, is missing: for each the gaps longer than 0.5s between consecutive timestamps (DTS for video when present, else PTS), over the span those timestamps cover since the previous line. The PIDs come from the PAT and PMT (audio: MPEG audio, AAC, AC-3, E-AC-3, or private data with an AC-3, E-AC-3 or AAC descriptor). A track that sends nothing in the window while the other one covers at least 5s of content reads `100`; a shorter sliver, as around a reconnect, does not count. The PAT and PMT are put back together when a section spans packets, sections not yet current are ignored, and a track that a complete PMT no longer lists is dropped; a PES header split over two packets is read whole. A reconnect seam, a discontinuity flag (on the PCR PID or either track, it excuses the next timestamp of both tracks) and a jump of 10s or more are not counted. A source that arrives at full rate but drops whole segments shows up here and nowhere else: `in` matches `crate` because the PCR jumps with the content. Measured on the input, so `RESV_AUDIO_FILL_GAPS` does not hide it. Healthy = flat zero; `0` also while a track has no timestamps yet. |
+| `dry=…s` | 6.7.0: how long the reservoir sat empty in this window, with the release having nothing to send. Only spells of at least 0.5s and over twice one read's time at the channel's bitrate count (see `maxgap`), since a channel with no cushion is empty between two reads however healthy it is. Healthy = `0.0s`. |
+| `maxgap=…s` | 6.7.0: the longest wait between two upstream reads in this window. A wait still going is reported at its length so far, so one long gap shows in several lines, growing. Reconnects fall inside it. Each read returns once it has 94KB, so the healthy value is about one read's time: 0.2s at 4 Mbps, 0.75s at 1 Mbps. |
+
+To place a freeze the player showed: find its time on the same stream. `dry` or `maxgap` above their healthy values in that window means delivery from upstream; both flat means the release or something downstream. The 15s `out`, `in` and `crate` averages cannot show a sub-second hole.
 
 ## Lifecycle events
 
@@ -32,6 +36,9 @@ Same file, free-form lines:
 | `upstream connection ended: dropped AB before its first TS packet and BB of an unfinished last packet` | 6.4.0: the connection started (A) or ended (B) mid-packet. Those bytes are kept out of the reservoir, so the writes to ffmpeg stay on the 188-byte grid across the seam. File only. Seen on every reconnect means the edge cuts connections mid-packet; harmless either way. |
 | `upstream connection: no TS sync in its first NKB; passing it on unaligned` | The connection's first chunk holds no MPEG-TS at all; it goes to ffmpeg as before 6.4.0, padded with `0xFF` to the next packet boundary when the connection ends, and ffmpeg's own error follows. Set `RESV_REJECT_MP4=1` if it is a provider's MP4 clip. |
 | `upstream error <type>: <msg>; retry in Ns` | Upstream read/connect failed; exponential backoff active. |
+| `upstream down and reservoir dry (no data Ns); exiting so Dispatcharr can reconnect or fail over` | 6.7.0: everything this process had was released and nothing has arrived for `RESV_DRY_EXIT_S`. Dispatcharr retries the same URL at once, then moves on to the next stream. |
+| `upstream down and reservoir dry (no data Ns); staying, at most one exit per stream URL every 31 min (last exit Ns ago)` | 6.7.0: the same condition, but this URL already had its exit, or `marker not writable` in the brackets when `RESV_LOG_DIR` cannot hold the marker. The process keeps retrying, and Dispatcharr's health monitor acts after 20-25s. Once per outage. |
+| `output timestamps start on the wall clock (offset Xs)` | 6.7.0, once per process with no `RESV_TS_CHANNEL`: `RESV_TS_WALLCLOCK` is on, and this is the offset handed to ffmpeg. |
 | `upstream stalled (no data Ns) - reconnecting, buffer kept` | #4 watchdog: no byte has arrived from upstream for `RESV_STALL_S`; reconnect WITHOUT flushing. Since 6.4.0 a silent connection is cut at once; before, the reconnect waited for the 30s socket timeout. A connect that hangs before the first byte still waits out urlopen's 30s. A replay being dropped by `RESV_REPLAY_SKIP` counts as arriving, so a slow replay never trips it; a full reservoir (`RESV_MAX_BYTES`, reading paused on purpose) is not a stall. |
 | `corrupt-loop detected in stream (dts=N x3) - forcing upstream reconnect + buffer flush` | ffmpeg-stderr-side detector: same `dts` reported 3× in 120s. |
 | `TS corruption detected (...)` | #5 ingest-side detector, ARMED (`RESV_TS_RECONNECT=1`). |
