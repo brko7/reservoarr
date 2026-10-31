@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import bisect
 import contextlib
+import hashlib
 import os
 import re
 import shutil
@@ -54,11 +55,14 @@ class Run:
     resv_stderr: str
     duration_s: float
     arrivals: list[tuple[float, int]] = field(default_factory=list)   # (wall s, output bytes so far)
+    exited_by_itself: bool = False                                    # False = still running at duration_s and stopped
+    returncode: int | None = None
 
     def stats_lines(self) -> list[dict]:
         """Parse the delaybuf.log telemetry lines into dicts.
         Format: cushion=Ns(pcr) buf=…MB out=…Mbps in=…Mbps crate=…Mbps in_total=…MB
-                reconnects=N ccerr=N pcrrej=N disc=N sync=N pcr_back=N
+                reconnects=N ccerr=N pcrrej=N disc=N sync=N pcr_back=N vholes=N% aholes=N%
+                dry=…s maxgap=…s
         """
         pat = re.compile(
             r"cushion=(?P<cushion>\d+)s\((?P<src>pcr|byte)\)\s+"
@@ -74,6 +78,7 @@ class Run:
             r"sync=(?P<sync>\d+)\s+"
             r"pcr_back=(?P<pcr_back>\d+)"
             r"(?:\s+vholes=(?P<vholes>\d+)%\s+aholes=(?P<aholes>\d+)%)?"
+            r"(?:\s+dry=(?P<dry>[\d.]+)s\s+maxgap=(?P<maxgap>[\d.]+)s)?"
         )
         out = []
         for line in self.log_file.read_text().splitlines():
@@ -97,6 +102,7 @@ def run_pipeline(
     duration_s: float = 75.0,
     front_s: float = 25.0,
     stalls: list[tuple[float, float]] | None = None,
+    outages: list[tuple[float, float]] | None = None,
     eof_at: float | None = None,
     corrupt_from: float | None = None,
     corrupt_rate: int = 5,
@@ -105,11 +111,12 @@ def run_pipeline(
     ts_channel: str | None = None,
     log_dir: Path | None = None,
     extra_env: dict[str, str] | None = None,
+    claim_exit_first: bool = False,
 ) -> Run:
     """Run cdn_sim + reservoarr.py for duration_s seconds; return collected
     artifacts. Caller asserts on Run.stats_lines() / Run.log_text() / out_ts.
 
-    TIMEBASE: cdn_sim event times (stalls, eof_at, corrupt_from) are on the
+    TIMEBASE: cdn_sim event times (stalls, outages, eof_at, corrupt_from) are on the
     sim's *edge clock*, which starts at front_s — the edge pretends front_s
     seconds of content already exist when the server starts. Wall-clock time
     of an event ≈ its edge time minus front_s. E.g. with front_s=25, a stall
@@ -126,6 +133,8 @@ def run_pipeline(
         cdn_argv.append("--pcr")
     for s, d in stalls or []:
         cdn_argv += ["--stall", f"{s}:{d}"]
+    for s, d in outages or []:
+        cdn_argv += ["--down", f"{s}:{d}"]
     if eof_at:
         cdn_argv += ["--eof-at", str(eof_at)]
     if corrupt_from is not None:
@@ -154,13 +163,17 @@ def run_pipeline(
     # the 15s cadence — DON'T env-override it; the test durations are sized
     # around it. (If a future tweak adds an env knob, document and use it.)
 
+    url = f"http://127.0.0.1:{port}/sim-test"
+    if claim_exit_first:
+        (log_dir / f"dryexit-{hashlib.sha256(url.encode()).hexdigest()[:16]}").touch()
+
     cdn = subprocess.Popen(cdn_argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     try:
         _wait_listening(port)
         with open(out_ts, "wb") as f:
             resv = subprocess.Popen(
                 [sys.executable, str(RESERVOIR),
-                 f"http://127.0.0.1:{port}/sim-test", "Mozilla/5.0"],
+                 url, "Mozilla/5.0"],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
             )
             arrivals: list[tuple[float, int]] = []
@@ -172,6 +185,7 @@ def run_pipeline(
                 t0 = time.time()
                 resv.wait(timeout=duration_s)
                 wall = time.time() - t0
+                exited_by_itself = True
             except subprocess.TimeoutExpired:
                 resv.terminate()
                 try:
@@ -180,6 +194,7 @@ def run_pipeline(
                     resv.kill()
                     resv.wait()
                 wall = duration_s
+                exited_by_itself = False
             copier.join(timeout=10)
             if copier.is_alive():                                     # ffmpeg outlived reservoarr, holding stdout
                 raise RuntimeError("reservoarr's output pipe stayed open 10s after it exited; out_ts is incomplete")
@@ -195,7 +210,8 @@ def run_pipeline(
             cdn_out = ""
 
     return Run(out_ts=out_ts, log_file=log_file, cdn_stdout=cdn_out or "",
-               resv_stderr=resv_err, duration_s=wall, arrivals=arrivals)
+               resv_stderr=resv_err, duration_s=wall, arrivals=arrivals,
+               exited_by_itself=exited_by_itself, returncode=resv.returncode)
 
 
 def _copy_out(src, dst, arrivals):

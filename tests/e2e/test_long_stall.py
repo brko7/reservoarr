@@ -10,12 +10,14 @@ from .harness import run_pipeline
 
 @pytest.mark.e2e
 def test_30s_stall_trips_watchdog_no_flush(tmp_path, synth_ts):
-    """Stall for 30s starting at edge time 35 (~10s wall — the edge clock
-    starts at front=25); #4 should fire, log a 'reconnecting, buffer kept'
-    line, and the fetcher should not flush the reservoir."""
+    """Stall for 30s starting at edge time 55 (~10s wall — the edge clock
+    starts at front=45); #4 should fire, log a 'reconnecting, buffer kept'
+    line, and the fetcher should not flush the reservoir. The 45s front banks
+    more than the 25s it takes #4 to fire: with less, the reservoir runs dry
+    first and the process exits (RESV_DRY_EXIT_S), see test_dry_exit.py."""
     run = run_pipeline(
-        tmp_path, synth_ts, rate_bps=300_010, duration_s=85,
-        stalls=[(35.0, 30.0)],
+        tmp_path, synth_ts, rate_bps=300_010, duration_s=85, front_s=45.0,
+        stalls=[(55.0, 30.0)],
     )
     log = run.log_text()
     assert "upstream stalled" in log and "buffer kept" in log, (

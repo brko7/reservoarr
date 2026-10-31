@@ -10,6 +10,8 @@ import threading
 import time
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 RESERVOIR_PATH = REPO_ROOT / "reservoarr.py"
 
@@ -62,6 +64,24 @@ def test_timeline_is_opt_in(tmp_path):
     assert resv.TS_CHANNEL == ""
     assert resv.ffmpeg_cmd() == resv.FFMPEG_CMD
     assert "-output_ts_offset" not in resv.FFMPEG_CMD
+
+
+def test_without_a_channel_the_offset_is_the_wall_clock(tmp_path):
+    resv = load(tmp_path)
+    assert resv.output_ts_offset(None, 50_000.0) == 50_000.0
+    assert resv.output_ts_offset(None, resv.TS_WRAP_S * 3 + 12.5) == pytest.approx(12.5)
+
+
+def test_the_wall_clock_offset_can_be_turned_off(tmp_path):
+    resv = load(tmp_path, RESV_TS_WALLCLOCK="0")
+    assert resv.output_ts_offset(None, 1_000_000.0) is None
+
+
+def test_a_channel_takes_precedence_over_the_wall_clock(tmp_path):
+    resv = load(tmp_path, RESV_TS_CHANNEL="7")
+    write_state(resv, end=1_000_130.0, wall=1_000_120.0)
+    timeline = resv.Timeline(resv.timeline_path(), 1_000_125.0)
+    assert resv.output_ts_offset(timeline, 1_000_125.0) == timeline.offset != 1_000_125.0
 
 
 def test_offset_goes_right_before_the_output(tmp_path):

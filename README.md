@@ -105,7 +105,7 @@ tail -F /data/scripts/logs/delaybuf.log | grep "cushion="
 You should see one stats line per active stream every 15 seconds. The shape is:
 
 ```
-2026-06-21T10:03:33+0000 [500004175] cushion=27s(pcr) buf=15.5MB out=4.66Mbps in=4.96Mbps crate=4.80Mbps in_total=1843MB reconnects=0 ccerr=0 pcrrej=0 disc=0 sync=0 pcr_back=0
+2026-06-21T10:03:33+0000 [500004175] cushion=27s(pcr) buf=15.5MB out=4.66Mbps in=4.96Mbps crate=4.80Mbps in_total=1843MB reconnects=0 ccerr=0 pcrrej=0 disc=0 sync=0 pcr_back=0 vholes=0% aholes=0% dry=0.0s maxgap=0.2s
 ```
 
 **Healthy after ~60s:**
@@ -130,6 +130,12 @@ The cushion is your only protection against starvation gaps. If it's too small f
 2. If cushion was already low (<10s) when the gap hit: **raise `RESV_TARGET_S`** above your observed worst gap. Each +10s of target ≈ +6–8 MB RAM at typical HD bitrates. Bump `RESV_MAX_BYTES` proportionally. A higher target keeps more of what the CDN front-loads; if `cushion=` already sat under the target, see the next entry.
 3. If cushion was healthy (~30s) and you saw a single very long gap (>30s): the CDN is broken or rate-limited. Increase target *and* check provider status — no buffer can hide a sustained content stoppage.
 
+### "A provider outage freezes the channel"
+
+Since 6.7.0, once the cushion is gone and nothing has arrived for 5s, the process exits and Dispatcharr acts on it: the same URL once, then after its 8s startup timeout the next stream on the channel. So give channels a backup stream from another provider if you can. In the log: `upstream down and reservoir dry`. No setting to change.
+
+With no backup stream, the next process waits for the provider to come back. A stream URL gets this fast exit once every 31 minutes, because Dispatcharr ends a channel with nowhere to go after three exits; another outage in that time freezes for as long as it lasts, and Dispatcharr's health monitor acts after 20-25s, as before ([docs/TUNABLES.md](docs/TUNABLES.md)).
+
 ### "Cushion never reaches the target"
 
 `cushion=` plateaus at 5–15s and won't climb. Three common causes:
@@ -151,6 +157,8 @@ For the second:
 2. On an older release: update, or add `RESV_GRACE_S=inf` to the profile parameters (see [where settings go](docs/TUNABLES.md#where-settings-go)), which keeps the floor at `1.0` for the whole stream. The pacer of those releases still runs 1–4% under realtime, depending on the bitrate (~2% at 8 Mbps); 6.5.0 fixes that too.
 
 Lowering `RESV_TARGET_S` also stops it, but releases everything above the new target at up to 1.15×, so reservoarr keeps only that much.
+
+If neither fits, check delivery from upstream. Since 6.7.0 the stats line has `dry=` and `maxgap=`: on the window with the freeze, values above healthy mean the data did not arrive; both flat means the release or something downstream ([docs/TELEMETRY.md](docs/TELEMETRY.md)).
 
 ### "ccerr or sync errors keep climbing"
 
@@ -201,6 +209,8 @@ Three watchdogs ride alongside (and if ffmpeg dies on its own, the stream ends s
 - **Corrupt-loop** (ffmpeg-stderr-side, default armed): same `dts` reported 3× → reconnect + flush.
 - **Stall** (#4, default armed): no ingest progress for `RESV_STALL_S` → cut the silent connection and reconnect WITHOUT flushing.
 - **TS corruption** (#5, default log-only): sustained CC/sync errors while bytes flow → reconnect + flush, when `RESV_TS_RECONNECT=1`.
+
+When an outage outlasts the cushion, the process exits (`RESV_DRY_EXIT_S`, once per URL per 31 minutes) so Dispatcharr retries or fails over at once. A process still waiting for its first byte stays.
 
 Deeper reading:
 

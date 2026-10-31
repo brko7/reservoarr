@@ -36,10 +36,12 @@ connection into whole TS packets (PacketAligner), passes them through the
 optional ReplaySkip gate into the Reservoir and the TsParser; Stream.pump()
 takes them out through the Pacer into ffmpeg's stdin. The stall watchdog,
 the corrupt-loop watcher on ffmpeg's stderr and the #5 CorruptionDetector
-ask the Upstream to reconnect. Settings are module constants read from the
-environment at import.
+ask the Upstream to reconnect. An outage that outlasts the reservoir ends the
+process, once per URL per half hour, so Dispatcharr acts on it. Settings are module constants read from
+the environment at import.
 """
 import fcntl
+import hashlib
 import json
 import math
 import os
@@ -96,6 +98,9 @@ SYNC_ERR_PER_WIN = int(os.getenv("RESV_SYNC_ERR_PER_WIN", "2"))       # sync los
 TS_SUSTAIN_WINS = int(os.getenv("RESV_TS_SUSTAIN_WINS", "2"))         # consecutive flagged windows before acting
 STALL_S = float(os.getenv("RESV_STALL_S", "25"))                      # no-ingest watchdog (#4); >CDN burst-gap, <urlopen 30s; 0=off
 GIVEUP_TRIES = int(os.getenv("RESV_GIVEUP_TRIES", "0"))               # exit after N no-data upstream tries so Dispatcharr fails over; 0=retry forever
+DRY_EXIT_S = float(os.getenv("RESV_DRY_EXIT_S", "5"))                 # reservoir empty and no byte for this long: exit so Dispatcharr acts; 0=off
+DRY_EXIT_EVERY_S = 1860.0                                             # at most one such exit per URL; over Dispatcharr's 1800s retry window
+DRY_SPELL_MIN_S = 0.5                                                 # shortest empty spell the stats line's dry= counts
 REJECT_MP4 = os.getenv("RESV_REJECT_MP4", "0") == "1"
 AUDIO_ARGS = {
     "ac3": ["-c:a", "ac3", "-b:a", "192k", "-ac", "2"],
@@ -149,6 +154,7 @@ FFMPEG_CMD = [
     "-f", "mpegts", "-muxdelay", "0", "-muxpreload", "0", "pipe:1",
 ]
 TS_CHANNEL = re.sub(r"[^A-Za-z0-9_-]", "", os.getenv("RESV_TS_CHANNEL", ""))[:64]
+TS_WALLCLOCK = os.getenv("RESV_TS_WALLCLOCK", "1") != "0"             # without a channel: start the output on the wall clock
 TS_SEAM_S = 1.0
 TS_SAVE_EVERY_S = 2.0
 TS_MAX_LEAD_S = 30.0
@@ -158,7 +164,9 @@ RELAY_DRAIN_S = 2.0
 # time.monotonic(): time.time() is the wall clock, and a backward NTP step of
 # T seconds turned into a single time.sleep(T) inside the pacing loop - long
 # enough and the cushion drains while we sleep, starving the player. Wall
-# clock remains only in log-line timestamps and the RESV_TS_CHANNEL timeline.
+# clock remains only in log-line timestamps, the output timestamp origin
+# (output_ts_offset(), the RESV_TS_CHANNEL timeline) and the marker of
+# claim_dry_exit(), which has to outlive this process.
 
 # Last path segment, for log tagging. Strip any query string and cap length so
 # a future provider URL shape can't leak an embedded key into the logs.
@@ -211,6 +219,46 @@ def ffmpeg_cmd(ts_offset=None):
     if ts_offset is None:
         return FFMPEG_CMD
     return [*FFMPEG_CMD[:-1], "-output_ts_offset", f"{ts_offset:.6f}", FFMPEG_CMD[-1]]
+
+
+def output_ts_offset(timeline, now):
+    """The -output_ts_offset for this process, or None for none. A restart
+    with the client still connected used to send PTS back to zero, by however
+    long the previous process ran. On the wall clock the next process starts
+    where real time has got to, so an outage moves the timestamps forward; a
+    switch with no gap can still step back by what the old process's output
+    ran ahead of the wall clock. RESV_TS_CHANNEL removes that step too."""
+    if timeline:
+        return timeline.offset
+    return now % TS_WRAP_S if TS_WALLCLOCK else None
+
+
+def claim_dry_exit(url, now):
+    """May this process exit on a dry reservoir? Dispatcharr counts each exit as
+    a failure, and three on one channel with no other stream to try end it,
+    disconnecting the viewers. Only a stream switch or 1800s without a failure
+    clears the count, and a blip short enough to be back within its 8s startup
+    clock does neither: three 8s blips ended a one-stream channel where they had
+    been three freezes. So one exit per URL per DRY_EXIT_EVERY_S, kept in a marker
+    file because the next exit is by another process; later outages ride it out
+    and Dispatcharr's health monitor still acts on them. Returns None when
+    granted, else the seconds since the last exit. A marker that cannot be
+    written cannot keep the limit, so it refuses (float inf). The name is a hash:
+    provider URLs carry credentials."""
+    path = os.path.join(LOG_DIR, f"dryexit-{hashlib.sha256(url.encode()).hexdigest()[:16]}")
+    try:
+        age = now - os.path.getmtime(path)
+    except OSError:
+        age = None
+    if age is not None and 0 <= age < DRY_EXIT_EVERY_S:
+        return age
+    try:
+        with open(path, "w"):
+            pass
+        os.utime(path, (now, now))
+    except OSError:
+        return float("inf")
+    return None
 
 
 def timeline_path():
@@ -643,7 +691,7 @@ class TsParser:
             video = 100
         return video, audio
 
-    def content_rate(self):
+    def byte_rate(self):
         """Mux bytes per second of content time, or None before PCR lock."""
         rm = self.rate_marks
         if len(rm) < 2:
@@ -651,7 +699,19 @@ class TsParser:
         (o0, p0), (o1, p1) = rm[0], rm[-1]
         if p1 - p0 < 1.5:                                             # startup: even a short span beats the
             return None                                               # burst-inflated arrival rate
-        return max((o1 - o0) / (p1 - p0), RATE_FLOOR)
+        return (o1 - o0) / (p1 - p0)
+
+    def content_rate(self):
+        """byte_rate() as a pacing reference: never under RATE_FLOOR."""
+        rate = self.byte_rate()
+        return None if rate is None else max(rate, RATE_FLOOR)
+
+    def chunk_s(self):
+        """Seconds one upstream read takes at this channel's bitrate: r.read(CHUNK)
+        returns only once it has the whole CHUNK, so a slow channel arrives in
+        lumps this far apart however healthy it is. RATE_FLOOR is not a floor on
+        the channel here, only the guess before PCR lock."""
+        return CHUNK / (self.byte_rate() or RATE_FLOOR)
 
     def released_pcr(self, released_total):
         """Content position of the release: cum_pcr at the last mark at or
@@ -683,6 +743,9 @@ class Reservoir:
         self.in_total = 0
         self.eof = False                                              # the fetcher has ended; nothing more will arrive
         self.in_marks = deque()                                       # (monotonic ts, in_total) samples
+        self.dry_since = None                                         # when the release emptied it, None while it holds data
+        self.dry_counted_to = 0.0                                     # empty time up to here has been reported
+        self.dry_spells = []                                          # (spell length, part not reported yet) since take_dry()
 
     @property
     def full(self):
@@ -692,6 +755,11 @@ class Reservoir:
         with self.cond:
             while self.bytes >= MAX_BYTES and not self.stop.is_set():
                 self.cond.wait(1)
+            if self.dry_since is not None:
+                now = time.monotonic()
+                if now - self.dry_since >= DRY_SPELL_MIN_S:
+                    self.dry_spells.append((now - self.dry_since, now - max(self.dry_since, self.dry_counted_to)))
+                self.dry_since = None
             self.chunks.append(piece)
             self.bytes += len(piece)
             self.in_total += len(piece)
@@ -717,11 +785,15 @@ class Reservoir:
                 self.chunks.appendleft(d[PACE_SLICE:])
                 d = d[:PACE_SLICE]
             self.bytes -= len(d)
+            if not self.chunks:
+                self.dry_since = time.monotonic()
             self.cond.notify_all()
             return d, self.in_total - self.bytes
 
     def flush(self):
         with self.cond:
+            if self.chunks:
+                self.dry_since = time.monotonic()
             self.chunks.clear()
             self.bytes = 0
             self.cond.notify_all()
@@ -742,6 +814,18 @@ class Reservoir:
             while (self.bytes < min_bytes and not self.eof
                    and time.monotonic() - t0 < max_s and not self.stop.is_set()):
                 self.cond.wait(0.5)
+
+    def take_dry(self, min_spell):
+        """Seconds it sat empty since the last call, in spells of at least
+        min_spell. A spell still open counts up to now and goes on from there."""
+        now = time.monotonic()
+        with self.cond:
+            total = sum(part for spell, part in self.dry_spells if spell >= min_spell)
+            self.dry_spells.clear()
+            if self.dry_since is not None and now - self.dry_since >= min_spell:
+                total += now - max(self.dry_since, self.dry_counted_to)
+                self.dry_counted_to = now
+        return total
 
     def in_rate(self):
         """Rolling arrival byte rate (fallback when PCR is unavailable). The
@@ -1002,6 +1086,8 @@ class Upstream:
         self.response = None                                          # live urllib response (for a forced abort)
         self.corrupt_seen = deque()                                   # (monotonic ts, dts) from ffmpeg stderr
         self.arrived_total = 0                                        # bytes off the wire, held replay and dropped partials included
+        self.last_arrival = None                                      # monotonic time of the last of them
+        self.max_gap = 0.0                                            # longest wait between reads since take_max_gap()
         self.reconnects = 0
         self.backoff = 1
 
@@ -1081,6 +1167,14 @@ class Upstream:
                         flush=False):
                     last_adv = time.monotonic()
 
+    def take_max_gap(self):
+        """The longest wait between arrivals since the last call, the one still
+        going included. Reconnects fall inside a gap, a full reservoir does not:
+        put() stops the reading on purpose then."""
+        gap, self.max_gap = self.max_gap, 0.0
+        last = self.last_arrival
+        return gap if last is None or self.reservoir.full else max(gap, time.monotonic() - last)
+
     def ingest(self, d):
         for start in range(0, len(d), CHUNK):
             piece = bytes(d[start:start + CHUNK])
@@ -1109,7 +1203,7 @@ class Upstream:
                 first = False
                 self.drain(r)
             except Exception as e:
-                log(f"upstream error {type(e).__name__}: {e}; retry in {self.backoff}s")
+                log(f"upstream error {type(e).__name__}: {e}; retry in {self.retry_wait()}s")
             if self.stop.is_set():
                 break
             held = b"" if self.flush_requested else self.replay.release_held()
@@ -1123,9 +1217,20 @@ class Upstream:
                     break
             if self.force.is_set():
                 continue                                             # intentional reconnect: flush + reconnect now, no backoff
-            time.sleep(self.backoff)
+            time.sleep(self.retry_wait())
             self.backoff = min(self.backoff * 2, 8)
         self.reservoir.close()
+
+    def retry_wait(self):
+        """Seconds to the next attempt. With the reservoir empty and the exit on a
+        dry reservoir still ahead, once a second: at 1s, 2s, 4s the provider could
+        be back for 2s when the process gives up on it, with nothing but the
+        backoff in the way."""
+        last = self.last_arrival
+        if (last is not None and not self.reservoir.bytes
+                and time.monotonic() - last < DRY_EXIT_S):
+            return 1
+        return self.backoff
 
     def drain(self, r):
         """Read one connection until EOF, an error, stop or a reconnect request.
@@ -1159,8 +1264,13 @@ class Upstream:
                     self.backoff = 1                                  # reset only once a connection has carried real
                     #                                                   data: an empty or tiny answer must keep
                     #                                                   backing off, not hammer the provider at 1/s
+                now = time.monotonic()
+                if self.last_arrival is not None:
+                    self.max_gap = max(self.max_gap, now - self.last_arrival)
+                self.last_arrival = now
                 self.arrived_total += len(d)
                 self.pass_on(aligner.feed(d))
+                self.last_arrival = time.monotonic()                  # a put() blocked on a full reservoir is not a gap
         finally:
             with self.lock:
                 self.response = None
@@ -1397,6 +1507,19 @@ class Stream:
         self.stop.set()
         self.reservoir.wake()
 
+    def dry_exit_due(self):
+        """Seconds without a byte if it is time to give the channel back to
+        Dispatcharr, else None. Called with the reservoir empty and data already
+        delivered. Dispatcharr only sees an outage through its health monitor,
+        20-25s of dead air and then the same URL first; on exit it acts at once.
+        A process that has delivered nothing never gets here: it stays to wait
+        for its first byte, which is what lets a channel with no backups recover.
+        Junk that no PCR ever came out of does not count as delivered either."""
+        if DRY_EXIT_S <= 0 or self.parser.cum_pcr <= 0 or self.upstream.last_arrival is None:
+            return None
+        silent = time.monotonic() - self.upstream.last_arrival
+        return silent if silent >= max(DRY_EXIT_S, 2 * self.parser.chunk_s()) else None
+
     def watch_ffmpeg(self, ff):
         """Relay ffmpeg's stderr until it closes, i.e. until ffmpeg is gone. If
         nothing asked it to go (OOM kill, crash), end the stream: with the
@@ -1427,7 +1550,8 @@ class Stream:
             f"releasing stream to ffmpeg")
 
         timeline = Timeline(timeline_path(), time.time()) if TS_CHANNEL else None
-        ff = subprocess.Popen(ffmpeg_cmd(timeline.offset if timeline else None), stdin=subprocess.PIPE,
+        offset = output_ts_offset(timeline, time.time())
+        ff = subprocess.Popen(ffmpeg_cmd(offset), stdin=subprocess.PIPE,
                               stdout=subprocess.PIPE if timeline else None, stderr=subprocess.PIPE, bufsize=0)
         threading.Thread(target=self.watch_ffmpeg, args=(ff,), daemon=True).start()
         relay = None
@@ -1436,6 +1560,8 @@ class Stream:
                 f"(output offset {timeline.offset:.3f}s)")
             relay = threading.Thread(target=stdout_relay, args=(ff, timeline), daemon=True)
             relay.start()
+        elif offset is not None:
+            log(f"output timestamps start on the wall clock (offset {offset:.3f}s)")
         if STALL_S > 0:
             threading.Thread(target=self.upstream.stall_watchdog, daemon=True).start()
 
@@ -1491,8 +1617,12 @@ class Stream:
     def pump(self, ff, timeline):
         """Release the reservoir to ffmpeg's stdin at the content rate, and log
         the telemetry line every STATS_EVERY_S - also while the reservoir is
-        dry, when the cushion it reports is the one thing worth knowing."""
+        dry, when the cushion it reports is the one thing worth knowing. Returns
+        once the fetcher has ended, or once the upstream has been down too long
+        with nothing left to release (dry_exit_due)."""
         pacer = Pacer(self.parser, self.reservoir)
+        delivered = False
+        told_staying = False
         out_since_stats = 0
         last_stats = time.monotonic()
         tail = b""                                                    # see align_to_188(): ffmpeg expects 188-aligned writes
@@ -1507,6 +1637,21 @@ class Stream:
                 if aligned:
                     ff.stdin.write(aligned)
                     out_since_stats += len(aligned)
+                    delivered = True
+                told_staying = False
+            elif delivered:
+                silent = self.dry_exit_due()
+                if silent is not None:
+                    refused = claim_dry_exit(self.upstream.url, time.time())
+                    if refused is None:
+                        log(f"upstream down and reservoir dry (no data {silent:.0f}s); "
+                            f"exiting so Dispatcharr can reconnect or fail over")
+                        break
+                    if not told_staying:
+                        told_staying = True
+                        since = "marker not writable" if refused == float("inf") else f"last exit {refused:.0f}s ago"
+                        log(f"upstream down and reservoir dry (no data {silent:.0f}s); "
+                            f"staying, at most one exit per stream URL every {DRY_EXIT_EVERY_S / 60:.0f} min ({since})")
             now = time.monotonic()
             if timeline and now - timeline.saved_at >= TS_SAVE_EVERY_S:
                 timeline.save(time.time())
@@ -1524,7 +1669,9 @@ class Stream:
             f"crate={(level.crate or 0) * 8 / 1e6:.2f}Mbps in_total={res.in_total / 1e6:.0f}MB "
             f"reconnects={self.upstream.reconnects} ccerr={p.cc_errors} "
             f"pcrrej={p.pcr_rejects} disc={p.pcr_disc} sync={p.sync_losses} "
-            f"pcr_back={p.pcr_back} vholes={vholes}% aholes={aholes}%",
+            f"pcr_back={p.pcr_back} vholes={vholes}% aholes={aholes}% "
+            f"dry={res.take_dry(max(DRY_SPELL_MIN_S, 2 * p.chunk_s())):.1f}s "
+            f"maxgap={self.upstream.take_max_gap():.1f}s",
             stderr=False)
         detail = self.detector.window(p.cc_errors, p.sync_losses, res.in_total)
         if detail:

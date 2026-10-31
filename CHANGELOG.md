@@ -2,6 +2,24 @@
 
 All notable changes to `reservoarr.py`. Each version's invariants are earned by a real production failure — read this before changing the script.
 
+## [6.7.0] — 2026-10-31
+
+Reservoarr now hands an outage back to Dispatcharr by itself, restarts no longer send timestamps back to the start, and the stats line shows the holes the 15s averages hide. Nothing to configure ([@sm0keb0x](https://github.com/sm0keb0x), [discussion #46](https://github.com/brko7/reservoarr/discussions/46)).
+
+- **An outage that outlasts the cushion ends the process, so Dispatcharr can act on it.** With the reservoir empty and the provider failing, reservoarr kept retrying, and Dispatcharr only found out through its health monitor: 20-25s of no data, then one more try of the same URL. Now the process exits once it has delivered data, the reservoir is empty and nothing has arrived for `RESV_DRY_EXIT_S` (default 5s, `0` = off). Bytes held or dropped by `RESV_REPLAY_SKIP` count as arriving, and a channel so slow that two reads take longer gets twice its read time. Until then a failed connection on an empty reservoir is retried every second, so the backoff cannot make the process give up on a provider that is already back. A process that has delivered nothing never exits this way: it stays to wait for its first byte, which is what lets a channel with no backup stream recover.
+
+  Measured on Dispatcharr 0.33.0-dev with two `cdn_sim` streams on a realtime edge, the first dropping and answering HTTP 500: the switch to the second stream came 13.8s after the outage instead of 34s, and data reached the client after about 17s instead of 37s.
+
+  **One such exit per stream URL every 31 minutes.** Dispatcharr counts each exit as a failure, and three with no other stream to try end the channel and disconnect the viewers. Only a switch, or 30 minutes without a failure, clears the count, and a blip that is back within Dispatcharr's 8s startup timeout does neither: on one stream, the third 8s blip ended the channel, where the old path had shown four freezes. A later outage within the 31 minutes rides it out as before, so the next stream takes the 20-25s path there. The limit is an empty `dryexit-<hash>` file per URL in `RESV_LOG_DIR`, and if it cannot be written the process stays.
+
+- **Every process starts its output timestamps on the wall clock.** A restarted process began again near PTS 0 with the client still connected, a jump back by the length of the session. Now, with `RESV_TS_CHANNEL` empty, ffmpeg gets `-output_ts_offset` set to the wall clock modulo the 33-bit wrap (`RESV_TS_WALLCLOCK=0` = off): no state file, no channel id, stdout untouched. After an outage time moves forward. In the same failover the seam went from -56.8s to +13.8s, and a stand-in for a `-copyts` transcoder (`ffmpeg -copyts -start_at_zero` to constant frame rate) dropped 0 frames at it instead of 478. A switch with no gap can still step back by how far the old output ran ahead of the wall clock: 2.9s measured with the 5s head start, against 33s before on the same run, and more while the controller is bleeding a cushion above the target. `RESV_TS_CHANNEL` stays the exact option and takes precedence.
+
+  Timestamps now start anywhere in the 33-bit range and cross its wrap within 26.5h, as a broadcast TS does. An offset just under the wrap keeps video and audio together through it with AC3 and AAC. Not run on Plex, Emby or Jellyfin themselves.
+
+- **`dry=` and `maxgap=` on the stats line**, at the end: how long the reservoir sat empty in the window, and the longest wait between upstream reads. A freeze in a window where they rise is delivery; with both flat it is the release or something downstream. A read returns only once it has 94KB, so `dry` counts only spells of at least 0.5s and over twice one read's time at the channel's bitrate, and the healthy `maxgap` is about one read's time ([docs/TELEMETRY.md](docs/TELEMETRY.md)).
+
+- `tools/cdn_sim.py --down START:DURATION` drops connections and answers HTTP 500. The e2e harness exposes whether the process exited by itself, and its return code. `test_long_stall` now banks more than the 25s the stall watchdog takes to fire, since with less the reservoir runs dry first.
+
 ## [6.6.0] — 2026-10-29
 
 The release is paced on the content time it carries instead of on a 90-second average byte rate ([@sm0keb0x](https://github.com/sm0keb0x), [discussion #46](https://github.com/brko7/reservoarr/discussions/46)). **This changes pacing for every install**, on every channel whose bitrate varies, which is most of them. No new tunables; the ffmpeg command and the telemetry line format are unchanged.
