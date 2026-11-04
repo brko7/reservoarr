@@ -102,6 +102,12 @@ DRY_EXIT_S = float(os.getenv("RESV_DRY_EXIT_S", "5"))                 # reservoi
 DRY_EXIT_EVERY_S = 1860.0                                             # at most one such exit per URL; over Dispatcharr's 1800s retry window
 DRY_SPELL_MIN_S = 0.5                                                 # shortest empty spell the stats line's dry= counts
 REJECT_MP4 = os.getenv("RESV_REJECT_MP4", "0") == "1"
+# RESV_START_AT_KEYFRAME=1: ffmpeg's input starts at the first video packet with
+# random_access_indicator, behind the last PAT and PMT, instead of wherever the
+# prefill ends (#32). Started mid-GOP, ffmpeg's 500KB probe has no SPS on a long
+# GOP: it writes the video with no size, and a downstream remux keeps the audio only.
+START_AT_KEYFRAME = os.getenv("RESV_START_AT_KEYFRAME", "0") == "1"
+KEYFRAME_WAIT_S = 6.0                                                 # from the tune, under Dispatcharr's 8s startup timeout
 AUDIO_ARGS = {
     "ac3": ["-c:a", "ac3", "-b:a", "192k", "-ac", "2"],
     "aac": ["-c:a", "aac", "-b:a", "192k", "-ac", "2", "-ar", "48000"],
@@ -477,6 +483,8 @@ class TsParser:
         self.rate_marks = deque()                                     # (fed, cum_pcr), ~90s content span
         self.cush_marks = deque()                                     # (fed, cum_pcr), popped as released
         self.pmt_pid = None
+        self.first_rap = None                                         # stream offset of the first video random-access packet
+        self.tables = {}                                              # pid -> last PAT/PMT packet before first_rap
         self.video = TrackHoles()
         self.audio = TrackHoles()
         self.holes_lock = threading.Lock()
@@ -535,6 +543,11 @@ class TsParser:
                 self._pcr(buf_, i, pid, disc)
         if disc and pid in (self.pcr_pid, self.video.pid, self.audio.pid):
             self.video.pending_disc = self.audio.pending_disc = True
+        if self.first_rap is None and buf_[i + 1] & 0x40:
+            if pid == 0 or pid == self.pmt_pid:
+                self.tables[pid] = bytes(buf_[i:i + 188])
+            elif pid == self.video.pid and afc & 0x2 and buf_[i + 4] and buf_[i + 5] & 0x40:
+                self.first_rap = self.base + i
         if afc & 0x1:
             start = i + 4 + (1 + buf_[i + 4] if afc & 0x2 else 0)
             end = i + 188
@@ -789,6 +802,18 @@ class Reservoir:
                 self.dry_since = time.monotonic()
             self.cond.notify_all()
             return d, self.in_total - self.bytes
+
+    def skip(self, n):
+        """Drop the first n bytes not yet released; they count as released."""
+        with self.cond:
+            while n and self.chunks:
+                d = self.chunks.popleft()
+                if len(d) > n:
+                    self.chunks.appendleft(d[n:])
+                    d = d[:n]
+                self.bytes -= len(d)
+                n -= len(d)
+            self.cond.notify_all()
 
     def flush(self):
         with self.cond:
@@ -1538,6 +1563,23 @@ class Stream:
         log(f"ffmpeg exited on its own (rc={rc}); shutting down")
         self.shutdown()
 
+    def start_at_keyframe(self, t0):
+        """RESV_START_AT_KEYFRAME: wait for the first video random-access packet
+        (KEYFRAME_WAIT_S from the tune at most), drop the reservoir up to it, and
+        return the PAT and PMT packets to write ahead of it, so ffmpeg opens on
+        the tables and an SPS. b"" if none came: release from the start."""
+        p, res = self.parser, self.reservoir
+        while (p.first_rap is None and not res.eof and not self.stop.is_set()
+               and time.monotonic() - t0 < KEYFRAME_WAIT_S):
+            time.sleep(0.05)
+        if p.first_rap is None:
+            log(f"no video keyframe {time.monotonic() - t0:.1f}s into the tune; releasing from the start")
+            return b""
+        res.skip(p.first_rap)
+        log(f"starting at the first video keyframe: dropped {p.first_rap / 1e6:.2f}MB ahead of it, "
+            f"{time.monotonic() - t0:.1f}s into the tune")
+        return b"".join(p.tables[pid] for pid in (0, p.pmt_pid) if pid in p.tables)
+
     def run(self):
         threading.Thread(target=self.upstream.run, daemon=True).start()
 
@@ -1548,6 +1590,7 @@ class Stream:
             return
         log(f"prefill done: {self.reservoir.bytes / 1e6:.1f}MB in {time.monotonic() - t0:.1f}s, "
             f"releasing stream to ffmpeg")
+        head = self.start_at_keyframe(t0) if START_AT_KEYFRAME else b""
 
         timeline = Timeline(timeline_path(), time.time()) if TS_CHANNEL else None
         offset = output_ts_offset(timeline, time.time())
@@ -1579,6 +1622,8 @@ class Stream:
         signal.signal(signal.SIGINT, on_term)
 
         try:
+            if head:
+                ff.stdin.write(head)
             self.pump(ff, timeline)
         except (BrokenPipeError, OSError) as e:
             log(f"stream consumer gone ({type(e).__name__}); shutting down")
