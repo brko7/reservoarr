@@ -35,12 +35,20 @@ def probed_size(path):
     return out.strip().splitlines()[0] if out.strip() else ""
 
 
+# Off, the same tune probes 0,0 on this fixture today. Strict xfail, not an
+# assert on 0,0: an ffmpeg that copes with it should fail the run here, so the
+# tunable can be reconsidered. Invariant #12's 8.3s-GOP channel opened with video
+# without +nobuffer: whether the probe finds an SPS depends on how much of the GOP
+# 500KB covers, so on the bitrate as much as on the GOP length.
+OFF = pytest.mark.xfail(strict=True, reason="#32: released mid-GOP, the 500KB probe has no SPS")
+
+
 @pytest.mark.e2e
-@pytest.mark.parametrize("on, size", [("0", "0,0"), ("1", "1280,720")])
-def test_long_gop_tune_probes_only_from_a_keyframe(tmp_path, long_gop_ts, on, size):
+@pytest.mark.parametrize("on", [pytest.param("0", marks=OFF), "1"])
+def test_long_gop_tune_probes_only_from_a_keyframe(tmp_path, long_gop_ts, on):
     run = run_pipeline(tmp_path, long_gop_ts, rate_bps=300_000, duration_s=25, front_s=10.0,
                        extra_env={"RESV_START_AT_KEYFRAME": on})
     log = run.log_text()
     assert ("starting at the first video keyframe" in log) == (on == "1"), log
-    assert probed_size(run.out_ts) == size, log
+    assert probed_size(run.out_ts) == "1280,720", log
     assert "Traceback" not in run.resv_stderr
