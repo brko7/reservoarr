@@ -1161,11 +1161,11 @@ class Upstream:
             if cur != last_in or self.reservoir.full:
                 last_in = cur
                 last_adv = time.monotonic()
-            elif time.monotonic() - last_adv > STALL_S and not self.force.is_set():
-                if self.request_reconnect(
+            elif (time.monotonic() - last_adv > STALL_S and not self.force.is_set()
+                    and self.request_reconnect(
                         f"upstream stalled (no data {time.monotonic() - last_adv:.0f}s) - reconnecting, buffer kept",
-                        flush=False):
-                    last_adv = time.monotonic()
+                        flush=False)):
+                last_adv = time.monotonic()
 
     def take_max_gap(self):
         """The longest wait between arrivals since the last call, the one still
