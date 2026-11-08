@@ -102,6 +102,12 @@ DRY_EXIT_S = float(os.getenv("RESV_DRY_EXIT_S", "5"))                 # reservoi
 DRY_EXIT_EVERY_S = 1860.0                                             # at most one such exit per URL; over Dispatcharr's 1800s retry window
 DRY_SPELL_MIN_S = 0.5                                                 # shortest empty spell the stats line's dry= counts
 REJECT_MP4 = os.getenv("RESV_REJECT_MP4", "0") == "1"
+# RESV_START_AT_KEYFRAME=1: ffmpeg's input starts at the first video packet with
+# random_access_indicator, behind the last PAT and PMT, instead of wherever the
+# prefill ends (#32). Started mid-GOP, ffmpeg's 500KB probe has no SPS on a long
+# GOP: it writes the video with no size, and a downstream remux keeps the audio only.
+START_AT_KEYFRAME = os.getenv("RESV_START_AT_KEYFRAME", "0") == "1"
+KEYFRAME_WAIT_S = 6.0                                                 # from the tune, under Dispatcharr's 8s startup timeout
 AUDIO_ARGS = {
     "ac3": ["-c:a", "ac3", "-b:a", "192k", "-ac", "2"],
     "aac": ["-c:a", "aac", "-b:a", "192k", "-ac", "2", "-ar", "48000"],
@@ -387,6 +393,24 @@ def pes_time(buf_, i):
             | buf_[i + 3] << 7 | buf_[i + 4] >> 1)
 
 
+def opens_with_sps(buf_, start, end, stream_type):
+    """Whether the PES payload of a random-access packet carries a sequence
+    parameter set: H.264 NAL 7, HEVC 32-34 (VPS/SPS/PPS lead an IRAP). Some
+    providers set random_access_indicator on packets with no IDR in them (#32);
+    released from one, ffmpeg's probe still finds no SPS. Other codecs: the flag alone."""
+    if stream_type not in (0x1B, 0x24):
+        return True
+    if buf_[start:start + 3] == b"\x00\x00\x01" and end - start >= 9:
+        start += 9 + buf_[start + 8]                                  # past the PES header
+    i = buf_.find(b"\x00\x00\x01", start, end - 3)
+    while i >= 0:
+        b = buf_[i + 3]
+        if (b & 0x1F == 7) if stream_type == 0x1B else (32 <= b >> 1 & 0x3F <= 34):
+            return True
+        i = buf_.find(b"\x00\x00\x01", i + 3, end - 3)
+    return False
+
+
 def carries_audio(stream_type, buf_, start, end):
     if stream_type in AUDIO_STREAM_TYPES:
         return True
@@ -477,6 +501,10 @@ class TsParser:
         self.rate_marks = deque()                                     # (fed, cum_pcr), ~90s content span
         self.cush_marks = deque()                                     # (fed, cum_pcr), popped as released
         self.pmt_pid = None
+        self.first_rap = None                                         # stream offset of the first video random-access packet
+        self.tables = {}                                              # pid -> packets of the last whole PAT/PMT before first_rap
+        self.table_pkts = {}                                          # pid -> packets of the PAT/PMT section being assembled
+        self.video_type = None                                        # PMT stream_type of the video PID
         self.video = TrackHoles()
         self.audio = TrackHoles()
         self.holes_lock = threading.Lock()
@@ -541,8 +569,15 @@ class TsParser:
             pusi = buf_[i + 1] & 0x40
             if start < end:
                 if pid == 0 or pid == self.pmt_pid:
-                    self._psi(buf_, start, end, pid, pusi)
+                    if self.first_rap is None:                        # keep every packet of the section, not just its first
+                        pkts = [] if pusi else self.table_pkts.get(pid, [])
+                        self.table_pkts[pid] = pkts + [bytes(buf_[i:i + 188])]
+                    if self._psi(buf_, start, end, pid, pusi) and self.first_rap is None:
+                        self.tables[pid] = b"".join(self.table_pkts.pop(pid, []))
                 elif pid == self.video.pid and (pusi or self.video.head is not None):
+                    if (self.first_rap is None and pusi and afc & 0x2 and buf_[i + 4] and buf_[i + 5] & 0x40
+                            and opens_with_sps(buf_, start, end, self.video_type)):
+                        self.first_rap = self.base + i
                     self._pes(buf_, start, end, self.video, pusi)
                 elif pid == self.audio.pid and (pusi or self.audio.head is not None):
                     self._pes(buf_, start, end, self.audio, pusi)
@@ -626,7 +661,7 @@ class TsParser:
                     self._pat(bytes(section[:total]))
                 else:
                     self._pmt(bytes(section[:total]))
-                return
+                return True
         self.psi[pid] = section
 
     def _pat(self, section):
@@ -651,6 +686,7 @@ class TsParser:
             info = (section[j + 3] & 0x0F) << 8 | section[j + 4]
             if video is None and section[j] in VIDEO_STREAM_TYPES:
                 video = pid
+                self.video_type = section[j]
             elif audio is None and carries_audio(section[j], section, j + 5, min(j + 5 + info, stop)):
                 audio = pid
             j += 5 + info
@@ -789,6 +825,21 @@ class Reservoir:
                 self.dry_since = time.monotonic()
             self.cond.notify_all()
             return d, self.in_total - self.bytes
+
+    def skip_to(self, offset):
+        """Drop what is left before stream offset `offset`; it counts as
+        released. Takes the offset, not a count, so it holds after a take or
+        a flush too: what has left the reservoir is not dropped again."""
+        with self.cond:
+            n = offset - (self.in_total - self.bytes)
+            while n > 0 and self.chunks:
+                d = self.chunks.popleft()
+                if len(d) > n:
+                    self.chunks.appendleft(d[n:])
+                    d = d[:n]
+                self.bytes -= len(d)
+                n -= len(d)
+            self.cond.notify_all()
 
     def flush(self):
         with self.cond:
@@ -1388,9 +1439,10 @@ class Pacer:
     alone ran a VBR channel under realtime whenever it was denser than that
     average, down to ~40% of realtime when a drop in bitrate ended."""
 
-    def __init__(self, parser, reservoir):
+    def __init__(self, parser, reservoir, start_s=0.0):
         self.parser = parser
         self.reservoir = reservoir
+        self.start_s = start_s                                        # content position the release starts at
         self.release_start = time.monotonic()                         # set once; intentionally NOT reset on
         #                                                               reconnect (no per-seam headstart re-dump)
         self.headstart_bytes = 0                                      # byte backstop before PCR lock
@@ -1422,7 +1474,7 @@ class Pacer:
         # per-connection front-load burst stays banked in the reservoir.
         released_s = level.released_s
         if (now - self.release_start < 15
-                and (released_s < HEADSTART_S if released_s is not None
+                and (released_s - self.start_s < HEADSTART_S if released_s is not None
                      else self.headstart_bytes < 2560 * 1024)):
             self.headstart_bytes += n
             return
@@ -1502,6 +1554,7 @@ class Stream:
         self.reservoir = Reservoir(self.stop)
         self.upstream = Upstream(url, ua, self.reservoir, self.parser, self.stop)
         self.detector = CorruptionDetector()
+        self.start_s = 0.0                                            # content position of the first release
 
     def shutdown(self):
         self.stop.set()
@@ -1538,6 +1591,28 @@ class Stream:
         log(f"ffmpeg exited on its own (rc={rc}); shutting down")
         self.shutdown()
 
+    def start_at_keyframe(self, t0):
+        """RESV_START_AT_KEYFRAME: wait for the first video random-access packet
+        (KEYFRAME_WAIT_S from the tune at most), drop the reservoir up to it, and
+        return the PAT and PMT packets to write ahead of it, so ffmpeg opens on
+        the tables and an SPS. b"" if none came: release from the start."""
+        p, res = self.parser, self.reservoir
+        while (p.first_rap is None and not res.eof and not self.stop.is_set()
+               and time.monotonic() - t0 < KEYFRAME_WAIT_S):
+            time.sleep(0.05)
+        if self.stop.is_set():
+            return b""
+        if p.first_rap is None:
+            log(f"no video keyframe {time.monotonic() - t0:.1f}s into the tune; releasing from the start")
+            return b""
+        res.skip_to(p.first_rap)
+        # The head start counts from here, not from the first byte fetched:
+        # what was dropped never reached ffmpeg.
+        self.start_s = p.released_pcr(p.first_rap) or 0.0
+        log(f"starting at the first video keyframe: dropped {p.first_rap / 1e6:.2f}MB ahead of it, "
+            f"{time.monotonic() - t0:.1f}s into the tune")
+        return b"".join(p.tables[pid] for pid in (0, p.pmt_pid) if pid in p.tables)
+
     def run(self):
         threading.Thread(target=self.upstream.run, daemon=True).start()
 
@@ -1548,6 +1623,7 @@ class Stream:
             return
         log(f"prefill done: {self.reservoir.bytes / 1e6:.1f}MB in {time.monotonic() - t0:.1f}s, "
             f"releasing stream to ffmpeg")
+        head = self.start_at_keyframe(t0) if START_AT_KEYFRAME else b""
 
         timeline = Timeline(timeline_path(), time.time()) if TS_CHANNEL else None
         offset = output_ts_offset(timeline, time.time())
@@ -1579,7 +1655,7 @@ class Stream:
         signal.signal(signal.SIGINT, on_term)
 
         try:
-            self.pump(ff, timeline)
+            self.pump(ff, timeline, head)
         except (BrokenPipeError, OSError) as e:
             log(f"stream consumer gone ({type(e).__name__}); shutting down")
         except ValueError:
@@ -1614,13 +1690,15 @@ class Stream:
                         f"{TS_MAX_LEAD_S:.0f}s ahead of the wall clock")
             log(f"stream wrapper exit (ffmpeg rc={ff.returncode})")
 
-    def pump(self, ff, timeline):
+    def pump(self, ff, timeline, head=b""):
         """Release the reservoir to ffmpeg's stdin at the content rate, and log
         the telemetry line every STATS_EVERY_S - also while the reservoir is
         dry, when the cushion it reports is the one thing worth knowing. Returns
         once the fetcher has ended, or once the upstream has been down too long
         with nothing left to release (dry_exit_due)."""
-        pacer = Pacer(self.parser, self.reservoir)
+        pacer = Pacer(self.parser, self.reservoir, self.start_s)
+        if head:
+            ff.stdin.write(head)                                      # PAT and PMT ahead of the keyframe
         delivered = False
         told_staying = False
         out_since_stats = 0
