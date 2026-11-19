@@ -2,6 +2,16 @@
 
 All notable changes to `reservoarr.py`. Each version's invariants are earned by a real production failure — read this before changing the script.
 
+## [Unreleased]
+
+New opt-in, log-only `RESV_DECODE_MONITOR=1` ([#64](https://github.com/brko7/reservoarr/issues/64)): a second ffmpeg decodes a copy of the released video and logs `would-fire: decoded picture corruption` after 3 bursts of decoder errors within 60s. With it unset nothing changes.
+
+- **The problem.** A provider can send a TS that is clean at the packet layer (no `ccerr`/`sync`, `in` at full rate) while the picture inside it is damaged: the player shows seconds of blocking each time, the #5 detector stays silent and so does the ffmpeg stderr loop check, since `-c:v copy` never decodes. Production evidence (Dispatcharr 0.34.0, Jellyfin 12.4.0, November 2026, an XC provider): channels with `vholes=0%` and no CC errors while a decoder on the same output logged bursts of `concealing N DC, N AC, N MV errors` and `error while decoding MB`; a wrapper around reservoarr that switched Dispatcharr to the channel's next stream on that signal kept playback going on Jellyfin Web and Android TV.
+
+- **The change.** `DecodeMonitor` feeds every write to ffmpeg's stdin into a bounded queue (64 chunks) drained by a writer thread into `ffmpeg -f mpegts -i pipe:0 -map 0:v:0 -f null -`. A full queue drops the chunk, never blocks `pump()`; the analyzer's errors in the 5s after a drop and in the first 20s of a tune (first GOP decoded mid-stream) are not counted. Error lines under 2s apart are one burst; 3 bursts within 60s log one would-fire line and counting restarts. No action is taken; switching stays Dispatcharr's job, to be discussed in #64 once there is data.
+
+- **Tests.** Unit (`tests/unit/test_decode_monitor.py`): off by default; 3 bursts in the window fire once; lines within the gap are one burst; bursts further apart than the window do not add up; grace and non-decoder lines are ignored; a full queue drops without blocking; a missing analyzer binary turns it off. Smoke-tested in the Dispatcharr 0.34.0 container with its ffmpeg: a 30s 720p H.264 TS with three damaged stretches (TS headers intact) logged one would-fire, 10 error lines, 0 drops.
+
 ## [6.8.0] — 2026-11-04
 
 New opt-in `RESV_START_AT_KEYFRAME=1`: the release starts at the first video keyframe, so a long-GOP channel no longer comes up with sound and no picture ([#32](https://github.com/brko7/reservoarr/issues/32), the part 6.3.2 left open). With it unset nothing changes.

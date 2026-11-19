@@ -45,6 +45,7 @@ import hashlib
 import json
 import math
 import os
+import queue
 import re
 import signal
 import socket
@@ -158,6 +159,22 @@ FFMPEG_CMD = [
     *(["-af", "aresample=async=1"] if AUDIO_FILL_GAPS else []),
     *(["-metadata:s:a:0", f"language={AUDIO_LANG}"] if AUDIO_LANG_OK else []),
     "-f", "mpegts", "-muxdelay", "0", "-muxpreload", "0", "pipe:1",
+]
+# Log-only: decode a copy of the released video in a second ffmpeg and log a
+# would-fire line when decoded pictures keep coming out damaged while the TS
+# layer is clean (no CC/sync errors, full rate), which none of the TS-side
+# detectors can see. Off by default: it costs one video decode per channel.
+DECODE_MONITOR = os.getenv("RESV_DECODE_MONITOR", "0") == "1"
+DECODE_ERROR_RE = re.compile(r"concealing \d+ DC|corrupt decoded frame|error while decoding MB")
+DECODE_GRACE_S = 20.0                                                 # tune-in: first GOP decodes from mid-stream
+DECODE_BURST_GAP_S = 2.0                                              # error lines closer than this are one burst
+DECODE_WINDOW_S = 60.0
+DECODE_BURSTS = 3
+DECODE_DROP_QUIET_S = 5.0                                             # a dropped copy chunk breaks the analyzer's own decode
+DECODE_QUEUE_CHUNKS = 64
+DECODE_CMD = [
+    FFMPEG_BIN, "-hide_banner", "-nostats", "-loglevel", "warning",
+    "-f", "mpegts", "-i", "pipe:0", "-map", "0:v:0", "-f", "null", "-",
 ]
 TS_CHANNEL = re.sub(r"[^A-Za-z0-9_-]", "", os.getenv("RESV_TS_CHANNEL", ""))[:64]
 TS_WALLCLOCK = os.getenv("RESV_TS_WALLCLOCK", "1") != "0"             # without a channel: start the output on the wall clock
@@ -1538,6 +1555,105 @@ class CorruptionDetector:
         return detail
 
 
+class DecodeMonitor:
+    """RESV_DECODE_MONITOR, log-only: a second ffmpeg decodes a copy of the
+    released video and its error lines are counted in bursts. A provider can
+    send a TS that is clean at the packet layer (no CC or sync errors, full
+    rate) while the picture inside is damaged; only a decoder sees that.
+    The copy never holds up the stream: feed() drops a chunk when the queue is
+    full, and the analyzer's errors right after a drop are not counted."""
+
+    def __init__(self, now=None):
+        now = time.monotonic() if now is None else now
+        self.quiet_until = now + DECODE_GRACE_S
+        self.last_error = None
+        self.bursts = deque()
+        self.errors = 0
+        self.dropped = 0
+        self.fired = 0
+        self.q = queue.Queue(maxsize=DECODE_QUEUE_CHUNKS)
+        self.proc = None
+
+    def observe(self, line, now):
+        """One analyzer stderr line. Returns a detail string when DECODE_BURSTS
+        bursts landed within DECODE_WINDOW_S, else None."""
+        if not DECODE_ERROR_RE.search(line) or now < self.quiet_until:
+            return None
+        self.errors += 1
+        new_burst = self.last_error is None or now - self.last_error > DECODE_BURST_GAP_S
+        self.last_error = now
+        if not new_burst:
+            return None
+        self.bursts.append(now)
+        while self.bursts and now - self.bursts[0] > DECODE_WINDOW_S:
+            self.bursts.popleft()
+        if len(self.bursts) < DECODE_BURSTS:
+            return None
+        detail = f"{len(self.bursts)} bursts in {now - self.bursts[0]:.0f}s; last: {line.strip()[:120]}"
+        self.bursts.clear()
+        self.fired += 1
+        return detail
+
+    def start(self):
+        try:
+            self.proc = subprocess.Popen(DECODE_CMD, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                                         stderr=subprocess.PIPE, bufsize=0)
+        except OSError as e:
+            log(f"decode monitor: analyzer did not start ({e}); off for this tune")
+            return False
+        threading.Thread(target=self._writer, daemon=True).start()
+        threading.Thread(target=self._reader, daemon=True).start()
+        log("decode monitor on (log-only)", stderr=False)
+        return True
+
+    def feed(self, data):
+        try:
+            self.q.put_nowait(data)
+        except queue.Full:
+            self.dropped += 1
+            self.quiet_until = max(self.quiet_until, time.monotonic() + DECODE_DROP_QUIET_S)
+
+    def _writer(self):
+        try:
+            while True:
+                d = self.q.get()
+                if d is None:
+                    break
+                self.proc.stdin.write(d)
+        except (OSError, ValueError):
+            pass
+        try:
+            self.proc.stdin.close()
+        except OSError:
+            pass
+
+    def _reader(self):
+        for raw in self.proc.stderr:
+            line = raw.decode("utf-8", "replace")
+            detail = self.observe(line, time.monotonic())
+            if detail:
+                log(f"would-fire: decoded picture corruption ({detail}); "
+                    f"RESV_DECODE_MONITOR is log-only", stderr=False)
+
+    def close(self):
+        if self.proc is None:
+            return
+        try:
+            self.q.put_nowait(None)
+        except queue.Full:
+            pass
+        try:
+            self.proc.terminate()
+            self.proc.wait(timeout=5)
+        except Exception:
+            try:
+                self.proc.kill()
+            except Exception:
+                pass
+        log(f"decode monitor: errors={self.errors} would-fire={self.fired} dropped={self.dropped}",
+            stderr=False)
+
+
 def announce_audio_codec():
     if AUDIO_CODEC_REQUESTED and AUDIO_CODEC != AUDIO_CODEC_REQUESTED:
         log(f"RESV_AUDIO_CODEC={AUDIO_CODEC_REQUESTED!r} is not one of {', '.join(AUDIO_ARGS)}; "
@@ -1554,6 +1670,7 @@ class Stream:
         self.reservoir = Reservoir(self.stop)
         self.upstream = Upstream(url, ua, self.reservoir, self.parser, self.stop)
         self.detector = CorruptionDetector()
+        self.decode = None                                            # DecodeMonitor when RESV_DECODE_MONITOR=1
         self.start_s = 0.0                                            # content position of the first release
 
     def shutdown(self):
@@ -1640,6 +1757,10 @@ class Stream:
             log(f"output timestamps start on the wall clock (offset {offset:.3f}s)")
         if STALL_S > 0:
             threading.Thread(target=self.upstream.stall_watchdog, daemon=True).start()
+        if DECODE_MONITOR:
+            monitor = DecodeMonitor()
+            if monitor.start():
+                self.decode = monitor
 
         def on_term(signum, frame):
             self.shutdown()
@@ -1683,6 +1804,8 @@ class Stream:
                     pass
             if relay:
                 relay.join(timeout=RELAY_DRAIN_S)
+            if self.decode:
+                self.decode.close()
             if timeline:
                 timeline.save(time.time())
                 if timeline.rejected:
@@ -1699,6 +1822,8 @@ class Stream:
         pacer = Pacer(self.parser, self.reservoir, self.start_s)
         if head:
             ff.stdin.write(head)                                      # PAT and PMT ahead of the keyframe
+            if self.decode:
+                self.decode.feed(head)
         delivered = False
         told_staying = False
         out_since_stats = 0
@@ -1714,6 +1839,8 @@ class Stream:
                 aligned, tail = align_to_188(tail, d)
                 if aligned:
                     ff.stdin.write(aligned)
+                    if self.decode:
+                        self.decode.feed(aligned)
                     out_since_stats += len(aligned)
                     delivered = True
                 told_staying = False
